@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prisma · 视觉小说工作台</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Prisma</a>
+    <nav aria-label="制作文档">
+      <a href="/docs/media-prompt-guide.md" target="_blank" rel="noopener">素材 Prompt</a>
+      <a href="/docs/media-checklist.md" target="_blank" rel="noopener">素材清单</a>
+      <a href="/docs/media-variants.md" target="_blank" rel="noopener">差分规格</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="page-head">
+      <div>
+        <h1>视觉小说工作台</h1>
+        <p>从原文整理 Scenario，逐场安排演出，再导出 Ren’Py 工程。</p>
+      </div>
+      <button id="sample" type="button">载入车站样例</button>
+    </div>
+
+    <div id="status" class="status" role="status" aria-live="polite">可以从原文或已有的 Scenario 开始。</div>
+
+    <div class="editors">
+      <section class="panel" aria-labelledby="raw-title">
+        <div class="panel-head">
+          <h2 id="raw-title"><label for="raw">原文</label></h2>
+          <label class="file-button">导入 TXT<input id="raw-file" type="file" accept=".txt,.md,text/plain" aria-label="导入原文"></label>
+        </div>
+        <textarea id="raw" spellcheck="false" placeholder="粘贴小说文本，或导入 UTF-8 文件。"></textarea>
+        <div class="panel-foot">
+          <label for="heading">起始章节</label>
+          <input id="heading" type="text" placeholder="# 序章（可选）">
+          <button id="draft" class="primary" type="button">生成 Scenario</button>
+        </div>
+        <details>
+          <summary>说话人映射</summary>
+          <label for="speakers">按原文行号填写 JSON，未指定的对白标为「？：」。</label>
+          <textarea id="speakers" class="code compact" spellcheck="false" placeholder='{"6": "林岚", "7": "周明"}'></textarea>
+        </details>
+      </section>
+
+      <section class="panel" aria-labelledby="scenario-title">
+        <div class="panel-head">
+          <h2 id="scenario-title"><label for="scenario">Scenario</label></h2>
+          <label class="file-button">导入 MD<input id="scenario-file" type="file" accept=".md,.txt,text/plain" aria-label="导入 Scenario"></label>
+          <button id="save-scenario" type="button">下载</button>
+        </div>
+        <textarea id="scenario" spellcheck="false" placeholder="在这里编辑剧本。把「？：」改成角色名，或改为无署名正文。"></textarea>
+        <div class="panel-foot">
+          <span id="scene-summary">等待解析</span>
+          <button id="inspect" type="button">解析场景</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="editors staging">
+      <section class="panel" aria-labelledby="scene-title">
+        <div class="panel-head">
+          <h2 id="scene-title">场景与台词</h2>
+          <select id="scene" aria-label="选择场景" disabled><option>暂无场景</option></select>
+        </div>
+        <div id="lines" class="lines" aria-label="场景台词"></div>
+        <p class="hint">点击一条文本，为它添加演出动作。</p>
+      </section>
+
+      <section class="panel" aria-labelledby="cue-title">
+        <div class="panel-head">
+          <h2 id="cue-title">演出与素材</h2>
+          <label class="file-button">添加素材<input id="files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.ogg,.opus,.mp3,.wav,.flac,.ttf,.otf,.ttc" aria-label="添加素材文件"></label>
+        </div>
+        <div id="file-list" class="files">可添加图片、音频和字体。素材文件按名称引用。</div>
+        <form id="cue-form" class="cue-form">
+          <output id="anchor" for="scene">选择一条台词</output>
+          <label class="sr-only" for="action">演出动作</label>
+          <select id="action">
+            <option value="background">切换背景</option><option value="show">显示立绘</option>
+            <option value="hide">隐藏立绘</option><option value="music">播放音乐</option>
+            <option value="stop">停止音乐</option><option value="sound">播放音效</option><option value="voice">台词配音</option>
+          </select>
+          <input id="actor" type="text" aria-label="角色名" placeholder="角色名" hidden>
+          <select id="asset" aria-label="演出素材"></select>
+          <button id="add-cue" type="submit" disabled>添加动作</button>
+        </form>
+        <div class="json-head">
+          <label for="cues">演出 JSON</label>
+          <label class="file-button">导入<input id="cues-file" type="file" accept=".json,application/json" aria-label="导入演出 JSON"></label>
+          <button id="save-cues" type="button">下载</button>
+        </div>
+        <textarea id="cues" class="code compact" spellcheck="false">{}</textarea>
+        <div class="panel-foot">
+          <label for="font">字体</label>
+          <select id="font"><option value="">Ren’Py 默认</option></select>
+          <button id="build" class="primary" type="button">下载 Ren’Py ZIP</button>
+        </div>
+      </section>
+    </div>
+    <footer>解压 ZIP 后可在 Ren’Py SDK 中打开工程。</footer>
+  </main>
+</body>
+</html>
