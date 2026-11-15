@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prisma · 视觉小说工作台</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+  <script src="/images.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Prisma</a>
+    <nav aria-label="制作文档">
+      <a href="#image-studio">图像工作室</a>
+      <a href="/docs/reproducible-workflow.md" target="_blank" rel="noopener">从零开始与 MCP</a>
+      <a href="/docs/media-prompt-guide.md" target="_blank" rel="noopener">素材 Prompt</a>
+      <a href="/docs/media-checklist.md" target="_blank" rel="noopener">素材清单</a>
+      <a href="/docs/media-variants.md" target="_blank" rel="noopener">差分规格</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="page-head">
+      <div>
+        <h1>视觉小说工作台</h1>
+        <p>从原文整理 Scenario，逐场安排演出，再导出 Ren’Py 工程。</p>
+      </div>
+      <button id="sample" type="button">载入车站样例</button>
+    </div>
+
+    <div id="status" class="status" role="status" aria-live="polite">可以从原文或已有的 Scenario 开始。</div>
+
+    <div class="editors">
+      <section class="panel" aria-labelledby="raw-title">
+        <div class="panel-head">
+          <h2 id="raw-title"><label for="raw">原文</label></h2>
+          <label class="file-button">导入 TXT<input id="raw-file" type="file" accept=".txt,.md,text/plain" aria-label="导入原文"></label>
+        </div>
+        <textarea id="raw" spellcheck="false" placeholder="粘贴小说文本，或导入 UTF-8 文件。"></textarea>
+        <div class="panel-foot">
+          <label for="heading">起始章节</label>
+          <input id="heading" type="text" placeholder="# 序章（可选）">
+          <button id="draft" class="primary" type="button">生成 Scenario</button>
+        </div>
+        <details>
+          <summary>说话人映射</summary>
+          <label for="speakers">按原文行号填写 JSON，未指定的对白标为「？：」。</label>
+          <textarea id="speakers" class="code compact" spellcheck="false" placeholder='{"6": "林岚", "7": "周明"}'></textarea>
+        </details>
+      </section>
+
+      <section class="panel" aria-labelledby="scenario-title">
+        <div class="panel-head">
+          <h2 id="scenario-title"><label for="scenario">Scenario</label></h2>
+          <label class="file-button">导入 MD<input id="scenario-file" type="file" accept=".md,.txt,text/plain" aria-label="导入 Scenario"></label>
+          <button id="save-scenario" type="button">下载</button>
+        </div>
+        <textarea id="scenario" spellcheck="false" placeholder="在这里编辑剧本。把「？：」改成角色名，或改为无署名正文。"></textarea>
+        <div class="panel-foot">
+          <span id="scene-summary">等待解析</span>
+          <button id="inspect" type="button">解析场景</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="editors staging">
+      <section class="panel" aria-labelledby="scene-title">
+        <div class="panel-head">
+          <h2 id="scene-title">场景与台词</h2>
+          <select id="scene" aria-label="选择场景" disabled><option>暂无场景</option></select>
+        </div>
+        <div id="lines" class="lines" aria-label="场景台词"></div>
+        <p class="hint">点击一条文本，为它添加演出动作。</p>
+      </section>
+
+      <section class="panel" aria-labelledby="cue-title">
+        <div class="panel-head">
+          <h2 id="cue-title">演出与素材</h2>
+          <a class="section-link" href="#image-studio">生成图片</a>
+          <label class="file-button">添加素材<input id="files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.ogg,.opus,.mp3,.wav,.flac,.ttf,.otf,.ttc" aria-label="添加素材文件"></label>
+        </div>
+        <div id="file-list" class="files">可添加图片、音频和字体。素材文件按名称引用。</div>
+        <form id="cue-form" class="cue-form">
+          <output id="anchor" for="scene">选择一条台词</output>
+          <label class="sr-only" for="action">演出动作</label>
+          <select id="action">
+            <option value="background">切换背景</option><option value="show">显示立绘</option>
+            <option value="hide">隐藏立绘</option><option value="music">播放音乐</option>
+            <option value="stop">停止音乐</option><option value="sound">播放音效</option><option value="voice">台词配音</option>
+          </select>
+          <input id="actor" type="text" aria-label="角色名" placeholder="角色名" hidden>
+          <select id="asset" aria-label="演出素材"></select>
+          <button id="add-cue" type="submit" disabled>添加动作</button>
+        </form>
+        <div class="json-head">
+          <label for="cues">演出 JSON</label>
+          <label class="file-button">导入<input id="cues-file" type="file" accept=".json,application/json" aria-label="导入演出 JSON"></label>
+          <button id="save-cues" type="button">下载</button>
+        </div>
+        <textarea id="cues" class="code compact" spellcheck="false">{}</textarea>
+        <div class="panel-foot">
+          <label for="font">字体</label>
+          <select id="font"><option value="">Ren’Py 默认</option></select>
+          <button id="build" class="primary" type="button">下载 Ren’Py ZIP</button>
+        </div>
+      </section>
+    </div>
+    <section class="panel image-studio" id="image-studio" aria-labelledby="image-title">
+      <div class="panel-head">
+        <h2 id="image-title">图像工作室</h2>
+        <button id="image-refresh" type="button">刷新环境</button>
+      </div>
+      <p class="hint studio-intro">从提示词生成背景、立绘或 CG。选中的候选图可加入当前工程素材。</p>
+      <div id="image-status" class="status" role="status" aria-live="polite">正在读取图像环境…</div>
+      <div class="image-columns">
+        <form id="image-form" class="image-card">
+          <fieldset class="mode-switch">
+            <legend class="sr-only">图像模型来源</legend>
+            <label><input type="radio" name="image-mode" value="local" checked><span>本地模型</span></label>
+            <label><input type="radio" name="image-mode" value="online"><span>在线模型</span></label>
+          </fieldset>
+          <p id="image-mode-note" class="hint"></p>
+          <div class="studio-actions prompt-actions">
+            <label for="image-preset" class="sr-only">提示词样例</label>
+            <select id="image-preset"><option value="">载入提示词样例</option><option value="portrait">军服近景肖像</option><option value="duo">双人花园</option><option value="library">图书馆日常</option></select>
+            <button id="image-scene" type="button">带入当前场景</button>
+          </div>
+          <label class="studio-field" for="image-prompt">提示词</label>
+          <textarea id="image-prompt" class="image-prompt" maxlength="4000" required placeholder="例如：一名短发女军官在明亮的石庭中回头，蓝白礼服，鲜艳的赛璐璐平涂。"></textarea>
+          <fieldset id="image-local" class="studio-grid">
+            <legend class="sr-only">本地推理参数</legend>
+            <label class="studio-wide">负面提示词<textarea id="image-negative" class="negative-prompt" maxlength="4000">cat ears, animal ears, tail, halo, wings, extra limbs, cropped head, text, watermark</textarea></label>
+            <label>LoRA<select id="image-lora"><option value="">底模</option></select></label>
+            <label>同 seed 对照<select id="image-compare"><option value="none">关闭</option></select></label>
+            <label>LoRA 权重<input id="image-weight" type="number" min="0.05" max="1.5" step="0.01" value="0.35"></label>
+            <label>分辨率<select id="image-local-size"><option value="512x896">512 × 896 · 立绘</option><option value="896x512">896 × 512 · 横图</option><option value="512x512">512 × 512 · 方图</option><option value="768x768">768 × 768 · 方图</option></select></label>
+            <label>Seed<input id="image-seed" type="number" min="0" max="2147483644" step="1" placeholder="随机"></label>
+            <label>采样器<select id="image-sampler"><option value="euler_a">Euler a</option><option value="euler">Euler</option><option value="dpm++2m">DPM++ 2M</option></select></label>
+            <label>采样步数<input id="image-steps" type="number" min="1" max="60" value="20" required></label>
+            <label>CFG<input id="image-cfg" type="number" min="1" max="15" step="0.1" value="6.5" required></label>
+            <button id="image-r2r3" class="studio-wide" type="button" hidden>套用 R2 / R3 对照配置</button>
+          </fieldset>
+          <fieldset id="image-online" class="studio-grid" hidden disabled>
+            <legend class="sr-only">在线图片参数</legend>
+            <label>OpenAI 模型<select id="image-model"></select></label>
+            <label>分辨率<select id="image-online-size"><option value="1024x1536">1024 × 1536 · 竖图</option><option value="1536x1024">1536 × 1024 · 横图</option><option value="1024x1024">1024 × 1024 · 方图</option></select></label>
+            <label>质量<select id="image-quality"><option value="low">低</option><option value="medium" selected>中</option><option value="high">高</option></select></label>
+          </fieldset>
+          <div class="studio-actions image-submit">
+            <label>张数 <input id="image-count" type="number" min="1" max="4" value="1" required></label>
+            <button id="image-generate" class="primary" type="submit" disabled>生成候选图</button>
+          </div>
+        </form>
+
+        <section class="image-card" aria-labelledby="image-result-title">
+          <div class="panel-head"><h2 id="image-result-title">候选与任务</h2><button id="image-reuse" type="button" hidden>复用生成参数</button><button id="image-replay" type="button" hidden>复跑本地任务</button><button id="image-cancel" type="button" hidden>取消任务</button></div>
+          <label class="studio-field">任务记录<select id="image-history"><option value="">暂无任务</option></select></label>
+          <p id="image-phase" class="hint">生成或训练完成后，可在这里查看产物。</p>
+          <progress id="image-progress" max="100" aria-label="当前任务进度" hidden></progress>
+          <div id="image-gallery" class="image-gallery" aria-label="候选图片"></div>
+          <div id="image-checkpoints" class="studio-actions"></div>
+          <details id="image-log-box" hidden><summary>任务日志</summary><pre id="image-log"></pre></details>
+        </section>
+      </div>
+
+      <details id="local-toolkit" class="image-toolkit">
+        <summary>本地工具箱 · 安装与 LoRA</summary>
+        <div class="image-columns toolkit-columns">
+          <section class="image-card" aria-labelledby="toolchain-title">
+            <h3 id="toolchain-title">安装与权重</h3>
+            <dl id="image-environment" class="image-env"></dl>
+            <div class="studio-actions">
+              <button id="image-install" type="button" disabled>拉取推理工具与底模</button>
+              <button id="image-install-train" type="button" disabled>拉取完整 LoRA 工具链</button>
+            </div>
+            <p class="hint">优先复用已有安装。首次安装会下载约 2.13 GB 的底模；训练环境另需下载 CUDA 版 PyTorch。</p>
+            <label class="studio-field">导入现成 LoRA（.safetensors）<input id="image-import-lora" type="file" accept=".safetensors"></label>
+            <p class="hint">浏览器单次可导入 45 MiB；更大的权重可放进工具箱的 loras 目录，再刷新环境。</p>
+          </section>
+          <form id="image-train-form" class="image-card">
+            <h3>训练新 LoRA</h3>
+            <p class="hint">基于 Anything V3 独立训练。用不同名称保存分支，训练完成后可直接试画。</p>
+            <div class="studio-grid">
+              <label class="studio-wide">已保存数据集<select id="image-train-dataset" required><option value="">先保存数据集</option></select></label>
+              <label class="studio-wide">输出名称<input id="image-train-name" maxlength="48" required pattern="[A-Za-z0-9][A-Za-z0-9_\-]{0,47}" placeholder="prisma_style_next"></label>
+              <label>训练步数<input id="image-train-steps" type="number" min="1" max="5000" value="200" required></label>
+              <label>每隔多少步保存<input id="image-train-save" type="number" min="1" max="5000" value="100" required></label>
+              <label>Rank<input id="image-train-rank" type="number" min="2" max="64" value="4" required></label>
+              <label>学习率<input id="image-train-lr" type="number" min="0.000001" max="0.001" step="0.000001" value="0.000100" required></label>
+              <label>每张重复次数<input id="image-train-repeats" type="number" min="1" max="50" value="10" required></label>
+              <label>训练 Seed<input id="image-train-seed" type="number" min="0" max="2147483647" value="1065270805" required></label>
+            </div>
+            <div class="studio-actions image-submit"><button id="image-train" class="primary" type="submit" disabled>开始训练</button></div>
+          </form>
+        </div>
+        <form id="image-dataset-form" class="image-card dataset-card">
+          <h3>准备训练数据集</h3>
+          <p class="hint">选择参考图或已有训练集，也可以补充上传。勾选要用的图并编辑标注，保存时会复制成独立数据集。</p>
+          <div class="studio-grid dataset-fields">
+            <label>来源<select id="image-dataset-source"><option value="">仅使用上传图片</option></select></label>
+            <label>上传图片与同名标注<input id="image-dataset-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.txt"></label>
+            <label>数据集名称<input id="image-dataset-name" maxlength="64" required placeholder="例如：Prisma 新画风参考"></label>
+            <label>共用触发词<input id="image-dataset-trigger" maxlength="64" value="prismaCel" placeholder="prismaCel"></label>
+          </div>
+          <div class="studio-actions dataset-actions">
+            <button id="image-dataset-all" type="button">全选</button><button id="image-dataset-none" type="button">取消全选</button>
+            <output id="image-dataset-count">0 张已选</output>
+            <label class="file-button">恢复数据集 ZIP<input id="image-dataset-restore" type="file" accept=".zip" aria-label="恢复数据集 ZIP"></label>
+          </div>
+          <div id="image-dataset-items" class="dataset-items"></div>
+          <div class="studio-actions image-submit"><a id="image-dataset-export" href="#" hidden>下载数据集 ZIP</a><button id="image-dataset-save" type="submit" disabled>保存数据集</button></div>
+        </form>
+      </details>
+    </section>
+    <footer>解压 ZIP 后可在 Ren’Py SDK 中打开工程。</footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# Local reference games, novels, and assets.
+/[Rr]eference/
+/build/
+__pycache__/
+
+# Model artifacts are downloaded or trained locally.
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.gguf
+*.onnx
+*.bin
