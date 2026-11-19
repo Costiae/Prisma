@@ -14,6 +14,7 @@
     <nav aria-label="制作文档">
       <a href="#pipeline">制作信息流</a>
       <a href="#image-studio">图像工作室</a>
+      <a href="#image-library">资源目录</a>
       <a href="/docs/reproducible-workflow.md" target="_blank" rel="noopener">从零开始与 MCP</a>
       <a href="/docs/media-prompt-guide.md" target="_blank" rel="noopener">素材 Prompt</a>
       <a href="/docs/media-checklist.md" target="_blank" rel="noopener">素材清单</a>
@@ -31,6 +32,45 @@
     </div>
 
     <div id="status" class="status" role="status" aria-live="polite">可以从原文或已有的 Scenario 开始。</div>
+
+    <section class="panel" id="projects" aria-labelledby="project-title">
+      <h2 id="project-title">项目</h2>
+      <div class="studio-grid">
+        <label>项目名称<input id="project-name" maxlength="128" placeholder="新项目名称"></label>
+        <label>已保存项目<select id="project-select"><option value="">选择项目</option></select></label>
+        <div class="studio-actions studio-wide">
+          <button id="project-save" type="button">保存项目</button>
+          <button id="project-save-copy" type="button" disabled>另存为新项目</button>
+          <button id="project-open" type="button">打开所选项目</button>
+        </div>
+      </div>
+    </section>
+
+    <details id="image-library" class="panel image-toolkit">
+        <summary>资源目录</summary>
+        <form id="image-library-search" class="studio-grid">
+          <label>类别<select id="image-library-kind">
+            <option value="">全部</option><option value="project">项目</option><option value="revision">项目版本</option>
+            <option value="source">原文</option><option value="scenario">Scenario</option><option value="cues">演出绑定</option>
+            <option value="prompt">提示词</option><option value="asset">媒体素材</option><option value="tool">工具</option>
+            <option value="model">模型</option><option value="lora">LoRA</option>
+            <option value="dataset">数据集</option><option value="job">任务</option>
+            <option value="artifact">产物</option><option value="export">导出</option>
+          </select></label>
+          <label>搜索<input id="image-library-query" type="search" maxlength="200" placeholder="名称、ID 或任务参数"></label>
+          <div class="studio-actions studio-wide">
+            <button type="submit">查询</button>
+            <button id="image-library-sync" type="button">重新扫描本机目录</button>
+          </div>
+        </form>
+        <div class="studio-actions">
+          <output id="image-library-status" aria-live="polite"></output>
+          <button id="image-library-prev" type="button" disabled>上一页</button>
+          <button id="image-library-next" type="button" disabled>下一页</button>
+        </div>
+        <ul id="image-library-rows" class="library-rows"></ul>
+        <section id="image-library-detail" class="image-card" aria-label="资源详情" hidden></section>
+      </details>
 
     <section id="pipeline" class="pipeline panel" aria-labelledby="pipeline-title">
       <div class="pipeline-heading">
@@ -233,6 +273,7 @@
         <div class="panel-foot">
           <span id="scene-summary">等待解析</span>
           <button id="inspect" type="button">解析场景</button>
+          <button id="anchor-scenario" type="button" title="为新增文本补充 ID，并按当前编号转换已有演出">固定演出位置</button>
         </div>
       </section>
     </div>
@@ -244,7 +285,7 @@
           <select id="scene" aria-label="选择场景" disabled><option>暂无场景</option></select>
         </div>
         <div id="lines" class="lines" aria-label="场景台词"></div>
-        <p class="hint">点击一条文本，为它添加演出动作。</p>
+        <p class="hint">点击一条文本添加演出。要转换旧的编号绑定，请核对当前编号后点「固定演出位置」。</p>
       </section>
 
       <section id="cue-panel" class="panel" aria-labelledby="cue-title">
@@ -313,6 +354,7 @@
             <label>采样器<select id="image-sampler"><option value="euler_a">Euler a</option><option value="euler">Euler</option><option value="dpm++2m">DPM++ 2M</option><option value="er_sde">Anima ER SDE</option></select></label>
             <label>采样步数<input id="image-steps" type="number" min="1" max="60" value="20" required></label>
             <label>CFG<input id="image-cfg" type="number" min="1" max="15" step="0.1" value="6.5" required></label>
+            <button id="image-export-lora" class="studio-wide" type="button" disabled>导出所选 LoRA 与训练资料</button>
             <button id="image-r2r3" class="studio-wide" type="button" hidden>套用 R2 / R3 对照配置</button>
           </fieldset>
           <fieldset id="image-online" class="studio-grid" hidden disabled>

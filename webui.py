@@ -6,13 +6,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import shutil
-import tempfile
 from urllib.parse import unquote, urlsplit
 
 from image_jobs import Busy, JOB_ID, own_workspace
 from image_toolkit import IMAGE_TYPES, ImageToolkit, child_file
+from lora_export import ARCHIVE_NAME, save_export
 from prisma_mcp import PrismaMCP, VERSIONS, rpc_error
-from prisma_workflow import asset_prompt, draft, inspect, make_archive, require_text
+from prisma_workflow import inspect, require_text
 
 
 ROOT = Path(__file__).resolve().parent
@@ -25,6 +25,7 @@ STATIC = {
     "/docs/media-checklist.md": ("docs/media-checklist.md", "text/plain; charset=utf-8"),
     "/docs/media-variants.md": ("docs/media-variants.md", "text/plain; charset=utf-8"),
     "/docs/reproducible-workflow.md": ("docs/reproducible-workflow.md", "text/plain; charset=utf-8"),
+    "/docs/resource-library.md": ("docs/resource-library.md", "text/plain; charset=utf-8"),
 }
 MAX_REQUEST = 64 * 1024 * 1024
 
@@ -67,6 +68,16 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith('/api/images/'):
             self.get_image_resource(path)
             return
+        if path.startswith('/api/workspace/assets/'):
+            ident = path.removeprefix('/api/workspace/assets/')
+            try:
+                resources = self.server.images.resources
+                metadata = resources.asset(ident)
+                self.send_file(resources.asset_path(metadata), 'application/octet-stream',
+                               attachment=f'prisma-asset{Path(metadata["name"]).suffix.lower()}')
+            except (OSError, ValueError):
+                self.respond_json(404, {'error': '素材不存在或无法读取。'})
+            return
         resource = STATIC.get(path)
         if resource is None:
             self.respond_json(404, {"error": "页面不存在。"})
@@ -96,7 +107,7 @@ class Handler(BaseHTTPRequestHandler):
     def get_export(self, path):
         try:
             _, _, _, ident, name = path.split('/')
-            if not JOB_ID.fullmatch(ident) or name != 'prisma-renpy.zip':
+            if not JOB_ID.fullmatch(ident) or name not in ('prisma-renpy.zip', 'prisma-dataset.zip', ARCHIVE_NAME):
                 raise FileNotFoundError()
             exports = self.server.images.home / 'exports'
             if not (exports / ident).resolve().is_relative_to(exports.resolve()):
@@ -128,10 +139,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_file(artifact, IMAGE_TYPES[artifact.suffix.lower()])
             elif len(route) == 2 and route[0] == 'dataset' and route[1].endswith('.zip'):
                 ident = route[1][:-4]
-                with tempfile.TemporaryDirectory(prefix='prisma-dataset-') as temp:
-                    archive = Path(temp) / 'dataset.zip'
-                    toolkit.dataset_archive(ident, archive)
-                    self.send_file(archive, 'application/zip', attachment=f'prisma-dataset-{ident}.zip')
+                archive = toolkit.dataset_export_path(ident)
+                self.send_file(archive, 'application/zip', attachment=f'prisma-dataset-{ident}.zip')
             else:
                 raise FileNotFoundError('接口不存在。')
         except (BrokenPipeError, ConnectionResetError):
@@ -161,11 +170,21 @@ class Handler(BaseHTTPRequestHandler):
             '/api/images/datasets': self.server.images.save_dataset,
             '/api/images/datasets/restore': self.server.images.restore_dataset,
             '/api/images/loras': self.server.images.import_lora,
+            '/api/images/loras/export': lambda data: save_export(self.server.images, data),
             '/api/images/train': self.server.images.train,
             '/api/images/cancel': lambda data: self.server.images.jobs.cancel(require_text(data, 'id')),
             '/api/images/replay': lambda data: self.server.images.replay(require_text(data, 'id')),
         }
-        routes = {'/api/draft': draft, '/api/scenes': inspect, '/api/asset-prompt': asset_prompt}
+        studio = self.server.mcp.workflow
+        routes = {'/api/draft': studio.draft, '/api/scenes': inspect, '/api/scenario/anchor': studio.anchor,
+                  '/api/scenario/save': studio.save_documents,
+                  '/api/asset-prompt': studio.asset_prompt,
+                  '/api/workspace/project/save': self.server.images.resources.save_project,
+                  '/api/workspace/project/open': self.server.mcp.open_project,
+                  '/api/workspace/assets/import': self.server.images.import_workspace_asset,
+                  '/api/images/library/list': self.server.images.library_list,
+                  '/api/images/library/item': self.server.images.library_item,
+                  '/api/images/library/refresh': self.server.images.refresh_library}
         is_mcp = self.path == '/mcp'
         if not is_mcp and self.path != '/api/build' and self.path not in routes and self.path not in image_routes:
             self.respond_json(404, {"error": "接口不存在。"})
@@ -215,9 +234,8 @@ class Handler(BaseHTTPRequestHandler):
             self.respond_json(400, {"error": str(error)})
 
     def build(self, data: dict) -> None:
-        with tempfile.TemporaryDirectory(prefix="prisma-web-") as temp:
-            archive = make_archive(data, Path(temp), self.server.images.artifact)
-            self.respond(200, "application/zip", archive.read_bytes(), attachment=True)
+        export = self.server.mcp.export(data)
+        self.send_file(Path(export['path']), 'application/zip', attachment='prisma-renpy.zip')
 
 
 def main() -> None:
@@ -231,6 +249,7 @@ def main() -> None:
                           use_existing=not args.no_existing_media)
     try:
         with own_workspace(images.home), ThreadingHTTPServer(('localhost', args.port), Handler) as server:
+            images.refresh_library()
             server.images = images
             base = f'http://127.0.0.1:{server.server_port}'
             server.mcp = PrismaMCP(images, base)

@@ -15,12 +15,15 @@ import subprocess
 import sys
 import tempfile
 import tarfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 
-from image_jobs import Jobs, JOB_ID, now, write_json
+from image_jobs import INDEX_PROJECTION, Jobs, JOB_ID, now, write_json
+from image_library import ImageLibrary, KINDS, artifact_id, timestamp
+from workspace_resources import MEDIA_TYPES, WorkspaceResources, content_id
 
 
 SD_ARCHIVE = 'sd-master-b521db4-bin-win-vulkan-x64.zip'
@@ -250,6 +253,15 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def record_model(job):
+    options = job.get('options', {})
+    if options.get('mode') == 'online' and options.get('model'):
+        return f'openai:{options["model"]}'
+    value = options.get('base_model') or options.get('model')
+    return {BASE_NAME: 'sd1', 'anything-v3': 'sd1', SDXL_NAME: 'sdxl'}.get(
+        value, value or ('sd1' if job.get('kind') in ('train', 'generate', 'install') else None))
+
+
 class ImageToolkit:
     def __init__(self, root, *, workspace=None, legacy_home=None, reference=None, use_existing=True):
         self.root = root
@@ -263,7 +275,11 @@ class ImageToolkit:
         self.models = self.home / 'models'
         self.dataset_root = self.home / 'datasets'
         self.lora_root = self.home / 'loras'
-        self.jobs = Jobs(self.home / 'jobs')
+        self.library = ImageLibrary(self.home)
+        self.resources = WorkspaceResources(self.library, self.artifact)
+        self.jobs = Jobs(self.home / 'jobs', self.library, self.index_job)
+        self._library_lock = threading.RLock()
+        self._library_ready = False
         self.identities = {}
         self.windows = os.name == 'nt' and platform.machine().lower() in ('amd64', 'x86_64')
         self.apple_silicon = sys.platform == 'darwin' and platform.machine().lower() in ('arm64', 'aarch64')
@@ -291,6 +307,8 @@ class ImageToolkit:
         return first_file(installed, self.legacy / BASE_NAME) if self.use_existing else first_file(installed)
 
     def training_base(self, model_id):
+        if model_id == 'sd1':
+            return self.base()
         profile = TRAINING_BASES[model_id]
         if model_id == 'iris3b':
             installed = self.models / profile['name']
@@ -303,11 +321,7 @@ class ImageToolkit:
                         installed / 'tokenizer' / 'tokenizer.json',
                         installed / 'tokenizer_2' / 'spiece.model')
             return installed if all(path.is_file() for path in required) else None
-        installed = self.models / profile['name']
-        if model_id == 'sd1' and self.use_existing:
-            portable = self.root / 'Reference' / 'portable' / 'base-model' / profile['name']
-            return first_file(installed, self.legacy / profile['name'], portable)
-        return first_file(installed)
+        return first_file(self.models / profile['name'])
 
     def training_models(self):
         sd_trainer = bool(self.trainer())
@@ -394,9 +408,10 @@ class ImageToolkit:
                 return python, code, cache
         return None
 
-    def loras(self):
+    def standalone_loras(self):
         found = {}
-        previous = (('inference-lora', 'R1'), ('output-v2', 'R2'), ('output-v3', 'R3')) if self.use_existing else ()
+        previous = (('output', 'R1'), ('inference-lora', 'R1'),
+                    ('output-v2', 'R2'), ('output-v3', 'R3')) if self.use_existing else ()
         for directory, run in previous:
             for path in sorted((self.pilot / directory).glob('*.safetensors')):
                 if not path.is_file() or not under(self.pilot / directory, path) or not LORA_STEM.fullmatch(path.stem):
@@ -408,22 +423,323 @@ class ImageToolkit:
         for path in sorted(self.lora_root.glob('*.safetensors')):
             if path.is_file() and under(self.lora_root, path) and LORA_STEM.fullmatch(path.stem):
                 found[f'import:{path.stem}'] = (path, path.stem, 0.35, 'sd1')
-        for record in sorted(self.jobs.root.glob('*/job.json'), reverse=True):
+        return found
+
+    def loras(self):
+        self.ensure_library()
+        found = self.standalone_loras()
+        for record in self.library.trained_loras():
             try:
-                job = self.jobs.get(record.parent.name)
-                if job['state'] != 'done' or job['kind'] != 'train':
-                    continue
-                base_model = job.get('options', {}).get('base_model', 'sd1')
-                family = TRAINING_BASES.get(base_model, {}).get('family', 'sd1')
-                for item in job['checkpoints']:
-                    if not item['name'].endswith('.safetensors'):
-                        continue
-                    path = child_file(record.parent / 'checkpoints', item['name'])
-                    found[f'{job["id"]}:{path.stem}'] = (path, item['label'],
-                                                         1.0 if family == 'anima' else 0.35, family)
+                job_id = record['id'].split(':', 1)[0]
+                path = child_file(self.jobs.directory(job_id) / 'checkpoints', Path(record['path']).name)
             except (OSError, ValueError):
                 continue
+            metadata = record['metadata']
+            found[record['id']] = (path, record['label'], metadata['strength'], metadata['family'])
         return found
+
+    def index_job(self, directory, job):
+        ident, job_kind = job['id'], job['kind']
+        manifest = directory / 'job.json'
+        stat = manifest.stat()
+        updated = timestamp(manifest)
+        options = job.get('options', {})
+        model = record_model(job)
+        family = TRAINING_BASES.get(model, {}).get('family', 'sd1')
+        links = []
+        if model:
+            links.append(('uses_model', 'model', model))
+        if options.get('dataset'):
+            links.append(('uses_dataset', 'dataset', options['dataset']))
+        for variant in options.get('loras', []):
+            lora = variant.get('id') if isinstance(variant, dict) else variant
+            if lora:
+                links.append(('uses_lora', 'lora', lora))
+        parent = options.get('parent_lora')
+        if parent:
+            links.append(('continues_from', 'lora', parent.get('id') if isinstance(parent, dict) else parent))
+        if options.get('replay_of'):
+            links.append(('replay_of', 'job', options['replay_of']))
+        if job_kind == 'generate' and options.get('prompt'):
+            prompt = options.get('prompt_id') or self.resources.prompt(
+                options['prompt'], options.get('negative') or '')
+            links.append(('uses_prompt', 'prompt', prompt))
+        if options.get('project_id'):
+            links.append(('for_project', 'project', options['project_id']))
+        inputs = job.get('inputs') or {}
+        if job_kind == 'train':
+            links.append(('uses_tool', 'tool', 'mflux' if family in ('anima', 'iris') else 'sd-scripts'))
+        elif inputs.get('engine'):
+            links.append(('uses_tool', 'tool', 'sd-cpp'))
+        title = options.get('name') or options.get('prompt', '')[:100] or str(options.get('target') or job_kind)
+        summary = {key: job[key] for key in ('started', 'ended', 'phase', 'error', 'options') if key in job}
+        summary.update(job_kind=job_kind, stamp=[stat.st_mtime_ns, stat.st_size, INDEX_PROJECTION])
+        records = [dict(kind='job', id=ident, label=title, path=manifest, state=job['state'],
+                        updated=updated, metadata=summary, links=links)]
+        for category in ('images', 'checkpoints'):
+            for item in job.get(category, []):
+                try:
+                    name = filename(item['name'])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                path = directory / category / name
+                label = item.get('label') or name
+                file_id = artifact_id(ident, category, name)
+                origin = ('produced_by', 'job', ident)
+                metadata = dict(item, category=category, job_id=ident,
+                                url=f'/api/images/files/{ident}/{category}/{urllib.parse.quote(name)}')
+                records.append(dict(kind='artifact', id=file_id, label=label, path=path,
+                                    updated=updated, metadata=metadata, links=[origin]))
+                if job_kind == 'train' and job['state'] == 'done' and category == 'checkpoints' and path.suffix == '.safetensors':
+                    lora_id = f'{ident}:{path.stem}'
+                    records.append(dict(kind='lora', id=lora_id, label=label, path=path, updated=updated,
+                                        metadata=dict(family=family, strength=1.0 if family == 'anima' else 0.35,
+                                                      sha256=item.get('sha256')),
+                                        links=[origin, ('weight_file', 'artifact', file_id), *links]))
+        self.library.replace(f'job:{ident}', records)
+
+    def index_dataset(self, manifest):
+        ident = manifest['id']
+        path = self.dataset_root / ident / 'dataset.json'
+        source = manifest.get('source', '')
+        links = [('derived_from', 'dataset', source)] if JOB_ID.fullmatch(source or '') else []
+        metadata = dict(count=len(manifest['items']), trigger=manifest.get('trigger'), source=source,
+                        url=f'/api/images/dataset/{ident}.zip')
+        updated = timestamp(path)
+        records = [dict(kind='dataset', id=ident, label=manifest['name'], path=path,
+                        updated=updated, metadata=metadata, links=links)]
+        for item in manifest['items']:
+            name = filename(item['name'])
+            records.append(dict(kind='asset', id=f'{ident}/{name}', label=name,
+                                path=path.parent / 'images' / name, updated=updated,
+                                metadata=dict(item, media_type='image',
+                                              url=f'/api/images/source/{ident}/{urllib.parse.quote(name)}'),
+                                links=[('member_of', 'dataset', ident)]))
+        self.library.replace(f'dataset:{ident}', records)
+
+    def index_workspace_files(self):
+        records = []
+        if self.reference.is_dir():
+            location = self.reference
+            candidates = [(path, 'reference') for path in sorted(location.rglob('*'))
+                          if path.suffix.lower() in MEDIA_TYPES and path.is_file() and under(location, path)]
+        else:
+            candidates = []
+        if self.use_existing:
+            for folder, role in ((self.root / 'Reference', 'reference'), (self.root / 'examples', 'reference'),
+                                 (self.pilot / 'profiles', 'profile'), (self.pilot / 'review', 'review'),
+                                 (self.pilot / 'experiments', 'experiment'),
+                                 (self.root / 'build' / 'local-media-preview', 'review')):
+                if not folder.is_dir():
+                    continue
+                paths = folder.glob('*') if role == 'reference' else folder.rglob('*')
+                candidates.extend((path, role) for path in paths if path.is_file() and under(folder, path))
+            portable = self.pilot / 'portable'
+            candidates.extend((path, 'experiment') for path in portable.glob('*') if path.is_file() and under(portable, path))
+            build = self.root / 'build'
+            for folder in (path for path in build.glob('*') if path.is_dir() and under(build, path)):
+                if folder.resolve() == self.home:
+                    continue
+                documents = [path for pattern in ('*scenario*.md', 'cues*.json') for path in folder.glob(pattern)
+                             if path.is_file() and under(folder, path)]
+                scripts = [path for pattern in ('game/script.rpy', '*/game/script.rpy') for path in folder.glob(pattern)
+                           if path.is_file() and under(folder, path)]
+                candidates.extend((path, 'legacy_document') for path in documents)
+                candidates.extend((path.parent.parent, 'legacy_export') for path in scripts)
+                if documents:
+                    candidates.extend((path, 'review') for path in folder.rglob('*')
+                                      if path.suffix.lower() in MEDIA_TYPES and path.is_file() and under(folder, path))
+        seen = set()
+        for path, role in candidates:
+            suffix = path.suffix.lower()
+            kind = ('export' if role == 'legacy_export' else 'asset' if suffix in MEDIA_TYPES
+                    else ('scenario' if suffix == '.md' else 'cues') if role == 'legacy_document'
+                    else 'source' if role == 'reference' and suffix in ('.txt', '.md')
+                    else 'prompt' if role == 'profile' and suffix == '.json' else
+                    'artifact' if role == 'experiment' and suffix in ('.json', '.md') else None)
+            if not kind or path in seen:
+                continue
+            seen.add(path)
+            metadata = dict(role=role, media_type=MEDIA_TYPES.get(suffix))
+            if path.is_file():
+                metadata['size'] = path.stat().st_size
+            records.append(dict(kind=kind, id=content_id(self.library.location(path)), label=path.name,
+                                path=path, updated=timestamp(path), state='legacy' if role.startswith('legacy') else None,
+                                metadata=metadata))
+        tools = {'sd-cpp': ('stable-diffusion.cpp', self.engine()),
+                 'sd-scripts': ('sd-scripts', self.trainer()), 'mflux': ('MFlux', self.mflux_environment())}
+        for ident, (label, location) in tools.items():
+            path = location[0] if isinstance(location, tuple) else location
+            if path:
+                records.append(dict(kind='tool', id=ident, label=label, path=path,
+                                    updated=timestamp(path), state='installed'))
+        if self.use_existing:
+            audio_tools = {'aivis': ('AivisSpeech', 'aivis'), 'voicevox': ('VOICEVOX', 'voicevox'),
+                           'kokoro': ('Kokoro', 'kokoro-int8-multi-lang-v1_1')}
+            for ident, (label, folder) in audio_tools.items():
+                path = self.legacy / folder
+                if path.is_dir():
+                    records.append(dict(kind='tool', id=ident, label=label, path=path, state='installed',
+                                        updated=timestamp(path), metadata={'media_type': 'audio'}))
+        self.library.replace('workspace_files', records)
+
+    def index_models(self):
+        records = []
+        for ident, profile in TRAINING_BASES.items():
+            path = self.training_base(ident)
+            actual_revision = self.model_revision_record(ident) if path else None
+            metadata = {key: profile[key] for key in ('name', 'family', 'revision', 'sha256', 'repo', 'url')
+                        if key in profile}
+            if actual_revision:
+                metadata['installation'] = actual_revision
+            records.append(dict(kind='model', id=ident, label=profile['label'],
+                                path=path, state='installed' if path else 'not_installed', metadata=metadata))
+        records.extend(dict(kind='model', id=f'openai:{model}', label=model, state='remote',
+                            metadata={'provider': 'OpenAI'}) for model in ONLINE_MODELS)
+        self.library.replace('models', records)
+
+    def index_standalone_loras(self):
+        records = []
+        recipe = self.home / 'lora-transfer.json'
+        legacy = json.loads(recipe.read_text(encoding='utf-8')).get('legacy', {}) if self.use_existing and recipe.is_file() else {}
+        sources = self.sources() if legacy else {}
+        for branch, details in legacy.items():
+            source = sources.get(details['source'])
+            if source:
+                records.append(dict(kind='dataset', id=f'legacy:{branch}', label=details['name'], path=source[0],
+                                    updated=timestamp(recipe), state='legacy',
+                                    metadata=dict(count=len(details['images']), trigger=details['trigger'],
+                                                  source=details['source'], training=details['training'])))
+        legacy_ids = {record['id'] for record in records}
+        for ident, (path, label, strength, family) in self.standalone_loras().items():
+            dataset = f'legacy:{ident.split("-", 1)[0]}'
+            links = [('uses_model', 'model', family)]
+            if dataset in legacy_ids:
+                links.append(('uses_dataset', 'dataset', dataset))
+            records.append(dict(kind='lora', id=ident, label=label, path=path, updated=timestamp(path),
+                                metadata=dict(family=family, strength=strength), links=links))
+        self.library.replace('standalone_loras', records)
+
+    def index_export(self, record):
+        ident = record['id']
+        path = self.home / record['path']
+        self.library.put(f'export:{ident}', dict(kind='export', id=ident, label=path.name, path=path,
+                                                updated=record['created'], metadata=record['metadata'],
+                                                links=record.get('links', [])))
+
+    def record_export(self, ident, path, export_kind, *, links=(), metadata=None):
+        info = dict(metadata or {}, export_kind=export_kind, size=path.stat().st_size if path.is_file() else None)
+        directory = self.home / 'exports' / ident
+        if path.parent == directory and path.name in ('prisma-lora.zip', 'prisma-renpy.zip', 'prisma-dataset.zip'):
+            info['url'] = f'/api/exports/{ident}/{path.name}'
+        record = dict(id=ident, path=self.library.location(path), created=timestamp(path),
+                      metadata=info, links=list(links))
+        directory.mkdir(parents=True, exist_ok=True)
+        write_json(directory / 'export.json', record)
+        self.index_export(record)
+
+    def refresh_library(self, _=None):
+        with self._library_lock:
+            skipped = self.resources.refresh() + self.jobs.refresh_index()
+            self.index_models()
+            self.index_workspace_files()
+            self.index_standalone_loras()
+            datasets = []
+            for path in self.dataset_root.glob('*/dataset.json'):
+                if not JOB_ID.fullmatch(path.parent.name) or not under(self.dataset_root, path):
+                    continue
+                try:
+                    manifest = json.loads(path.read_text(encoding='utf-8'))
+                    if manifest['id'] != path.parent.name:
+                        raise ValueError('Dataset ID does not match its directory.')
+                    datasets.append(manifest)
+                except (OSError, ValueError, KeyError, TypeError):
+                    skipped += 1
+            for manifest in datasets:
+                self.index_dataset(manifest)
+            for directory in (self.home / 'exports').glob('*'):
+                if not JOB_ID.fullmatch(directory.name) or not under(self.home / 'exports', directory):
+                    continue
+                sidecar = directory / 'export.json'
+                try:
+                    if sidecar.is_file():
+                        record = json.loads(sidecar.read_text(encoding='utf-8'))
+                        if record['id'] != directory.name:
+                            raise ValueError('Export ID does not match its directory.')
+                        self.index_export(record)
+                    else:
+                        for name, kind in (('prisma-lora.zip', 'lora'), ('prisma-renpy.zip', 'renpy'),
+                                           ('prisma-dataset.zip', 'dataset')):
+                            if (directory / name).is_file():
+                                self.record_export(directory.name, directory / name, kind)
+                                break
+                except (OSError, ValueError, KeyError, TypeError):
+                    skipped += 1
+            self._library_ready = True
+        return {'path': str(self.library.path), 'total': self.library.list(limit=1)['total'], 'skipped': skipped}
+
+    def ensure_library(self):
+        if not self._library_ready:
+            with self._library_lock:
+                if not self._library_ready:
+                    self.refresh_library()
+
+    def library_list(self, data):
+        self.ensure_library()
+        kind = data.get('kind')
+        if kind is not None:
+            choice(kind, KINDS, '记录类别')
+        query = string(data.get('query', ''), '搜索词', 200, required=False)
+        limit = number(data.get('limit', 30), '每页条数', 1, 100, integer=True)
+        offset = number(data.get('offset', 0), '起始位置', 0, 2_147_483_647, integer=True)
+        result = self.library.list(kind=kind, query=query, limit=limit, offset=offset)
+        for row in result['items']:
+            self.library_job_state(row)
+        return result
+
+    def library_item(self, data):
+        self.ensure_library()
+        kind = choice(data.get('kind'), KINDS, '记录类别')
+        ident = string(data.get('id'), '记录 ID', 500)
+        item = self.library_job_state(self.library.get(kind, ident))
+        metadata = item['metadata']
+        if (kind in ('source', 'scenario', 'cues') and item['available']
+                and metadata.get('role') in ('reference', 'legacy_document')):
+            path = self.home / item['path']
+            if under(self.root, path) and path.stat().st_size <= 4 * 1024 * 1024:
+                try:
+                    text = path.read_text(encoding='utf-8-sig')
+                    if kind == 'cues':
+                        metadata['cues'] = json.loads(text)
+                    else:
+                        metadata['text'] = text
+                except (OSError, ValueError):
+                    pass
+        return item
+
+    def import_workspace_asset(self, data):
+        if not data.get('library_id'):
+            return self.resources.import_asset(data)
+        if data.get('data') is not None or data.get('artifact') is not None:
+            raise ValueError('请只选择一个素材来源。')
+        item = self.library_item({'kind': 'asset', 'id': data['library_id']})
+        name = data.get('name') or item['label']
+        metadata = item['metadata']
+        if metadata.get('artifact'):
+            return self.resources.register_asset(name, artifact=metadata['artifact'], origin=item['id'])
+        if not item['path']:
+            raise FileNotFoundError('素材文件不存在。')
+        path = self.home / item['path']
+        if not path.is_file() or path.stat().st_size > MAX_UPLOAD:
+            raise ValueError('素材文件不存在或超过 45 MiB。')
+        return self.resources.register_asset(name, blob=path.read_bytes(), origin=item['id'])
+
+    def library_job_state(self, row):
+        active = self.jobs.active
+        if (row['kind'] == 'job' and row['state'] in ('running', 'cancelling')
+                and (active is None or active.directory.name != row['id'])):
+            row['state'] = 'interrupted'
+        return row
 
     def sources(self):
         result = {}
@@ -450,6 +766,7 @@ class ImageToolkit:
         return result
 
     def catalog(self):
+        self.ensure_library()
         trainer = self.trainer()
         mflux = self.mflux_environment()
         trainer_path = trainer[0] if trainer else mflux[0] if mflux else None
@@ -554,8 +871,10 @@ class ImageToolkit:
                 output.with_suffix('.txt').write_text(caption + '\n', encoding='utf-8')
                 items.append({'name': output.name, 'original': original, 'caption': caption,
                               'sha256': sha256_file(output)})
-            write_json(staged / 'dataset.json', dict(id=ident, name=name, trigger=trigger, source=source, items=items))
+            manifest = dict(id=ident, name=name, trigger=trigger, source=source, items=items)
+            write_json(staged / 'dataset.json', manifest)
             staged.rename(self.dataset_root / ident)
+        self.index_dataset(manifest)
         return {'id': ident, 'name': name, 'count': len(items)}
 
     def dataset_manifest(self, ident, *, verify=False):
@@ -600,14 +919,30 @@ class ImageToolkit:
             shutil.copy2(caption, staged / caption.name)
         return staged
 
-    def dataset_archive(self, ident, archive):
-        manifest = self.dataset_manifest(ident, verify=True)
+    def dataset_archive(self, ident, archive, *, manifest=None):
+        manifest = manifest if manifest is not None else self.dataset_manifest(ident, verify=True)
         folder = self.dataset_root / ident / 'images'
         with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_STORED) as zipped:
             zipped.writestr('dataset.json', json.dumps(manifest, ensure_ascii=False, indent=2))
             for item in manifest['items']:
                 for name in (item['name'], Path(item['name']).with_suffix('.txt').name):
                     zipped.write(child_file(folder, name), f'images/{name}')
+
+    def dataset_export_path(self, ident, *, manifest=None):
+        manifest = manifest if manifest is not None else self.dataset_manifest(ident, verify=True)
+        export_id = content_id(['dataset-export', ident])[:16]
+        directory = self.home / 'exports' / export_id
+        path = directory / 'prisma-dataset.zip'
+        with self._library_lock:
+            directory.mkdir(parents=True, exist_ok=True)
+            if not path.is_file():
+                with tempfile.TemporaryDirectory(dir=directory, prefix='.export-') as temporary:
+                    staged = Path(temporary) / path.name
+                    self.dataset_archive(ident, staged, manifest=manifest)
+                    staged.replace(path)
+            if not (directory / 'export.json').is_file():
+                self.record_export(export_id, path, 'dataset', links=[('includes', 'dataset', ident)])
+        return path
 
     def restore_dataset(self, data):
         """Restore an exported dataset with the original manifest and filenames."""
@@ -680,6 +1015,7 @@ class ImageToolkit:
             else:
                 write_json(output / 'dataset.json', restored)
                 output.rename(self.dataset_root / ident)
+        self.index_dataset(restored)
         return {'id': ident, 'name': name, 'count': len(saved)}
 
     def payload(self, job, url, target, *, sha256, limit, label, cache_name=None):
@@ -714,6 +1050,8 @@ class ImageToolkit:
                 stream.write(blob)
         except FileExistsError as error:
             raise ValueError('已存在同名 LoRA，请重命名后导入。') from error
+        with self._library_lock:
+            self.index_standalone_loras()
         return {'id': f'import:{path.stem}'}
 
     def provision(self, data):
@@ -769,6 +1107,8 @@ class ImageToolkit:
                     self.install_iris_base(job)
                 elif model_id == 'anima':
                     self.install_anima_base(job)
+            self.index_models()
+            self.index_workspace_files()
             job.update(installation=self.catalog()['local'])
             if model_id == 'iris3b':
                 revision = self.model_revision_record(model_id)
@@ -1062,6 +1402,24 @@ class ImageToolkit:
         options = dict(mode=mode, prompt=prompt, count=count)
         if original:
             options['replay_of'] = original['id']
+
+        def queue(work):
+            selected = data.get('prompt_id')
+            if selected:
+                selected = string(selected, '提示词 ID', 64)
+                saved = self.library_item({'kind': 'prompt', 'id': selected})['metadata']
+            else:
+                saved = {}
+            negative = options.get('negative', '')
+            if saved.get('prompt') == prompt and saved.get('negative', '') == negative:
+                options['prompt_id'] = selected
+            else:
+                options['prompt_id'] = self.resources.prompt(prompt, negative, derived_from=selected)
+            project_id = data.get('project_id')
+            if project_id:
+                options['project_id'] = self.library_item({'kind': 'project', 'id': project_id})['id']
+            return self.jobs.start('generate', options, work)
+
         if mode == 'online':
             key = os.environ.get('OPENAI_API_KEY', '').strip()
             if not key:
@@ -1069,7 +1427,7 @@ class ImageToolkit:
             options.update(model=choice(data.get('model', ONLINE_MODELS[0]), ONLINE_MODELS, '在线模型'),
                            size=choice(data.get('size', ONLINE_SIZES[0]), ONLINE_SIZES, '图片尺寸'),
                            quality=choice(data.get('quality', 'medium'), ('low', 'medium', 'high'), '质量'))
-            return self.jobs.start('generate', options, lambda job: self.online_generate(job, options, key))
+            return queue(lambda job: self.online_generate(job, options, key))
 
         negative = string(data.get('negative', ''), '负面提示词', 4000, required=False)
         if re.search(r'<\s*lora\s*[:>]', prompt + '\n' + negative, re.IGNORECASE):
@@ -1132,7 +1490,7 @@ class ImageToolkit:
                            cfg=number(data.get('cfg', 4.5), 'CFG', 1, 15), sampler=sampler,
                            loras=[dict(id=ident, label=label, weight=strength)
                                   for _, ident, label, strength in variants])
-            return self.jobs.start('generate', options,
+            return queue(
                                    lambda job: self.local_generate_anima(job, options, trainer, model,
                                                                          variants, original))
         if family == 'sdxl':
@@ -1186,7 +1544,7 @@ class ImageToolkit:
                 self.record_inputs(job, inputs, original)
                 self.local_generate_sdxl(job, options, model, variants, runner, python, code)
 
-            return self.jobs.start('generate', options, work_sdxl)
+            return queue(work_sdxl)
 
         if family == 'sd1' and self.apple_silicon:
             model = self.training_base('sd1')
@@ -1239,7 +1597,7 @@ class ImageToolkit:
                 self.record_inputs(job, inputs, original)
                 self.local_generate_mps_sd1(job, options, model, variants, runner, python, code)
 
-            return self.jobs.start('generate', options, work_mps_sd1)
+            return queue(work_mps_sd1)
 
         model, engine = self.base(), self.engine()
         if not self.windows or not model or not engine:
@@ -1270,7 +1628,7 @@ class ImageToolkit:
             self.record_inputs(job, inputs, original)
             self.local_generate(job, options, model, engine, variants)
 
-        return self.jobs.start('generate', options, work)
+        return queue(work)
 
     @staticmethod
     def online_generate(job, options, key):
@@ -1941,6 +2299,7 @@ class ImageToolkit:
         if loss_plot.is_file() and under(output, loss_plot):
             recovered['loss_plot'] = self.identity(loss_plot)
         write_json(record_dir / 'job.json', recovered)
+        self.index_job(record_dir, recovered)
         return recovered
 
     def train_lora(self, job, options, trainer, model, images, model_id):

@@ -9,7 +9,9 @@ import tempfile
 from urllib.parse import quote
 
 from image_toolkit import IMAGE_TYPES, ONLINE_MODELS, ONLINE_SIZES, SAMPLERS
-from prisma_workflow import asset_prompt, draft, inspect, make_archive
+from image_library import KINDS
+from lora_export import save_export
+from prisma_workflow import StudioWorkflow, inspect, make_archive
 
 
 VERSIONS = ('2025-11-25', '2025-06-18', '2025-03-26')
@@ -45,19 +47,38 @@ def rpc_error(ident, code, message):
 class PrismaMCP:
     def __init__(self, images, base_url):
         self.images = images
+        self.workflow = StudioWorkflow(images.resources)
         self.base_url = base_url
         self.exports = images.home / 'exports'
         self.tools = {}
         tool = self.register
-        tool('scenario_draft', 'Turn raw script text into editable Scenario and report unresolved lines.', draft,
-             {'raw': TEXT, 'speakers': OBJECT, 'heading': TEXT}, ('raw',), read_only=True)
-        tool('scenario_inspect', 'List scene IDs, speakers and numbered lines from a Scenario.', inspect,
+        tool('scenario_draft', 'Turn raw script text into editable Scenario and register its source and draft. Set line_ids to include stable text item IDs.',
+             self.workflow.draft, {'raw': TEXT, 'speakers': OBJECT, 'heading': TEXT, 'line_ids': BOOL}, ('raw',))
+        tool('scenario_inspect', 'List scenes, speakers, text positions, and any stable text item IDs.', inspect,
              {'scenario': TEXT}, ('scenario',), read_only=True)
-        tool('scenario_asset_prompt', 'Prepare a background, sprite or CG prompt and return the nearby Scenario lines for review.', asset_prompt,
+        tool('scenario_save', 'Register edited source, Scenario and cues without changing their content.',
+             self.workflow.save_documents, {'raw': TEXT, 'scenario': TEXT, 'cues': {'type': ['object', 'string']}})
+        tool('scenario_anchor', 'Add stable IDs to text items, convert cues to by_line_id, and register both revisions.',
+             self.workflow.anchor, {'scenario': TEXT, 'cues': {'type': ['object', 'string']}}, ('scenario',))
+        tool('scenario_asset_prompt', 'Register a background, sprite or CG prompt with the nearby Scenario lines for review.', self.workflow.asset_prompt,
              {'scenario': TEXT, 'scene': TEXT, 'kind': enum('background', 'sprite', 'cg'), 'line': INT,
-              'brief': TEXT, 'trigger': TEXT}, ('scenario', 'scene', 'kind'), read_only=True)
+              'brief': TEXT, 'trigger': TEXT}, ('scenario', 'scene', 'kind'))
         tool('image_catalog', 'List online readiness, local installation, reference sources, LoRAs, and recent jobs.',
              lambda _: images.catalog(), {}, read_only=True)
+        tool('library_list', 'Search the workspace catalog by category, label, ID, path, or recorded options. Returns paginated records.',
+             images.library_list, {'kind': enum(*KINDS), 'query': TEXT, 'limit': INT, 'offset': INT}, read_only=True)
+        tool('library_item', 'Read a catalog record with metadata and related records, including source jobs, models, datasets, LoRAs, and exports.',
+             images.library_item, {'kind': enum(*KINDS), 'id': TEXT}, ('kind', 'id'), read_only=True)
+        tool('library_refresh', 'Reconcile the SQLite catalog with existing Prisma task manifests, datasets, model files, and exports.',
+             images.refresh_library, {})
+        tool('project_save', 'Save a new project or a new revision. Updating a project requires the latest revision ID.',
+             images.resources.save_project, {'id': JOB, 'revision': TEXT, 'title': TEXT, 'raw': TEXT,
+                'scenario': TEXT, 'cues': OBJECT, 'assets': schema('object', additionalProperties=TEXT),
+                'font': TEXT, 'heading': TEXT, 'speakers': OBJECT}, ('title',))
+        tool('project_open', 'Load a project and its current or requested revision. Includes Scenario, cues and reusable asset IDs.',
+             self.open_project, {'id': JOB, 'revision': TEXT}, ('id',), read_only=True)
+        tool('asset_import', 'Register media from base64, reuse an existing asset by library ID, or reuse a generated image.',
+             images.import_workspace_asset, {'name': TEXT, 'data': TEXT, 'artifact': IMAGE_ASSET, 'library_id': TEXT})
         tool('image_install', 'Download and validate missing local components. Inference installs the Windows Vulkan engine and SD 1.x base; training installs the CUDA or Apple MPS environment and selected SD 1.x or Animagine XL 4.0 anime SDXL base. On Apple Silicon, iris3b or anima installs MFlux and Apple MLX with the selected model snapshot for local LoRA training. Anima Base is anime-specific; its model and derivatives are limited to non-commercial use.',
              images.provision, {'target': enum('inference', 'training'), 'base_model': enum('sd1', 'sdxl', 'iris3b', 'anima')},
              ('target',), open_world=True)
@@ -69,12 +90,14 @@ class PrismaMCP:
              self.save_dataset, {'name': TEXT, 'source': TEXT, 'trigger': TEXT,
                                  'items': schema('array', items=DATASET_ITEM, minItems=1, maxItems=150)},
              ('name', 'items'))
-        tool('dataset_export', 'Get the dataset manifest, exact local directory, and URL for its ZIP of images and captions.',
-             self.dataset_export, {'id': JOB}, ('id',), read_only=True)
+        tool('dataset_export', 'Export or reuse the dataset ZIP. Returns the manifest, local directory, and download URL.',
+             self.dataset_export, {'id': JOB}, ('id',))
         tool('dataset_restore', 'Restore an exported dataset with the same ID, names and hashes. Supply its ZIP as base64 or omit data to read the extracted snapshot from the configured reference directory.',
              images.restore_dataset, {'data': TEXT})
         tool('lora_import', 'Import a compatible SD 1.x safetensors LoRA as base64 (up to 45 MiB).',
              images.import_lora, {'name': TEXT, 'data': TEXT}, ('name', 'data'))
+        tool('lora_export', 'Export selected LoRA IDs and their saved training datasets and records as a portable Prisma workspace ZIP. Base model dependencies are recorded in the manifest.',
+             self.lora_export, {'loras': schema('array', items=TEXT, minItems=1)}, ('loras',))
         tool('lora_train', 'Train an SD 1.x, SDXL, Apple Silicon Iris-3B, or anime-specific Anima Base LoRA on a saved dataset. Set parent_lora to continue a compatible SD 1.x or SDXL LoRA from its existing weights. Iris and Anima use MFlux on Apple MLX at 512 px with gradient checkpointing; Anima writes ComfyUI-compatible LoRA weights. Anima and its derivatives are limited to non-commercial use. Check image_job for checkpoints and provenance.',
              images.train, {'dataset': JOB, 'name': TEXT, 'base_model': enum('sd1', 'sdxl', 'iris3b', 'anima'),
                             'steps': INT, 'save_every': INT, 'rank': INT,
@@ -87,7 +110,8 @@ class PrismaMCP:
                                'loras': schema('array', items=TEXT, minItems=1, maxItems=2),
                                'base_model': enum('sd1', 'sdxl', 'anima'), 'width': INT,
                                'height': INT, 'steps': INT, 'cfg': schema('number'), 'sampler': enum(*SAMPLERS),
-                               'weight': schema('number'), 'seed': INT}, ('mode', 'prompt'), open_world=True)
+                               'weight': schema('number'), 'seed': INT, 'prompt_id': TEXT,
+                               'project_id': JOB}, ('mode', 'prompt'), open_world=True)
         tool('image_job', 'Read a job state, parameters, input hashes, log tail, and artifact links by job ID.',
              self.job, {'id': JOB}, ('id',), read_only=True)
         tool('image_recover_training', 'Recover artifacts from a completed Iris-3B training run when MFlux wrote them to its timestamped output folder. The task is marked complete only after the final LoRA archive is found and registered.',
@@ -102,7 +126,8 @@ class PrismaMCP:
         tool('renpy_export', 'Build a Ren’Py ZIP. Bind generated images by job ID and filename using image_assets. Ordinary files can be supplied as base64.',
              self.export, {'scenario': TEXT, 'cues': {'type': ['object', 'string']}, 'font': TEXT,
                            'image_assets': schema('object', additionalProperties=IMAGE_ASSET),
-                           'files': schema('object', additionalProperties=TEXT)}, ('scenario',))
+                           'files': schema('object', additionalProperties=TEXT),
+                           'asset_ids': schema('object', additionalProperties=TEXT), 'project_id': JOB}, ('scenario',))
 
     def register(self, name, description, handler, fields, required=(), *, read_only=False, destructive=False, open_world=False):
         self.tools[name] = (handler, dict(name=name, description=description, inputSchema=row(fields, required),
@@ -130,8 +155,17 @@ class PrismaMCP:
     def dataset_export(self, args):
         ident = args['id']
         manifest = self.images.dataset_manifest(ident, verify=True)
-        return {'manifest': manifest, 'path': str(self.images.dataset_root / ident),
+        archive = self.images.dataset_export_path(ident, manifest=manifest)
+        return {'manifest': manifest, 'path': str(self.images.dataset_root / ident), 'archive': str(archive),
                 'download': f'{self.base_url}/api/images/dataset/{ident}.zip'}
+
+    def open_project(self, args):
+        self.images.ensure_library()
+        return self.images.resources.load_project(args)
+
+    def lora_export(self, args):
+        result = save_export(self.images, args)
+        return dict(result, url=f'{self.base_url}{result["url"]}')
 
     def job(self, args):
         record = self.images.jobs.get(args['id'], details=True)
@@ -165,15 +199,21 @@ class PrismaMCP:
 
     def export(self, args):
         ident = secrets.token_hex(8)
+        links = []
+        if project := args.get('project_id'):
+            self.images.library_item({'kind': 'project', 'id': project})
+            links.append(('for_project', 'project', project))
         self.exports.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='export-', dir=self.exports) as temporary:
             stage = Path(temporary)
-            archive = make_archive(args, stage, self.images.artifact)
+            archive = make_archive(args, stage, self.images.artifact, resources=self.images.resources, links=links)
             out = stage / ident
             out.mkdir()
             archive.rename(out / archive.name)
             out.rename(self.exports / ident)
-        return {'id': ident, 'path': str(self.exports / ident / 'prisma-renpy.zip'),
+        path = self.exports / ident / 'prisma-renpy.zip'
+        self.images.record_export(ident, path, 'renpy', links=links)
+        return {'id': ident, 'path': str(path),
                 'url': f'{self.base_url}/api/exports/{ident}/prisma-renpy.zip'}
 
     def call(self, params):

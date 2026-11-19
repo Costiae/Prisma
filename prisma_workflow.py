@@ -2,11 +2,10 @@
 
 import base64
 from dataclasses import asdict
-import json
 from pathlib import Path, PureWindowsPath
 import shutil
 
-from prisma import build_project, draft_scenario, parse_scenario, read_mapping, render_script
+from prisma import anchor_scenario, build_project, decode_mapping, draft_scenario, parse_scenario, render_script
 
 
 def require_text(data, key):
@@ -20,13 +19,32 @@ def draft(data):
     speakers = data.get('speakers', {})
     if not isinstance(speakers, dict):
         raise ValueError('说话人映射须为 JSON 对象。')
+    line_ids = data.get('line_ids', False)
+    if type(line_ids) is not bool:
+        raise ValueError('line_ids 须为布尔值。')
     scenario, pending = draft_scenario(require_text(data, 'raw'), speakers, require_text(data, 'heading').strip() or None)
+    if line_ids:
+        scenario, _ = anchor_scenario(scenario, {})
     return {'scenario': scenario, 'pending': pending}
 
 
 def inspect(data):
     scenes = parse_scenario(require_text(data, 'scenario'), allow_unresolved=True)
     return {'scenes': [asdict(scene) for scene in scenes]}
+
+
+def read_cues(data):
+    cues = data.get('cues', {})
+    if isinstance(cues, dict):
+        return cues
+    if isinstance(cues, str):
+        return decode_mapping(cues.strip() or '{}', 'cues.json')
+    raise ValueError('演出动作须为 JSON 对象或 JSON 文本。')
+
+
+def anchor(data):
+    scenario, cues = anchor_scenario(require_text(data, 'scenario'), read_cues(data))
+    return {'scenario': scenario, 'cues': cues}
 
 
 ASSET_FRAMING = {
@@ -61,6 +79,42 @@ def asset_prompt(data):
             'negative': negative}
 
 
+class StudioWorkflow:
+    """Record the shared Scenario operations as workspace resources."""
+
+    def __init__(self, resources):
+        self.resources = resources
+
+    def draft(self, data):
+        result = draft(data)
+        source_id = self.resources.document('source', require_text(data, 'raw'))
+        links = [('from_source', 'source', source_id)]
+        scenario_id = self.resources.document('scenario', result['scenario'], links)
+        return dict(result, source_id=source_id, scenario_id=scenario_id)
+
+    def anchor(self, data):
+        result = anchor(data)
+        previous = self.resources.document('scenario', require_text(data, 'scenario'))
+        scenario_id = self.resources.document('scenario', result['scenario'])
+        if previous != scenario_id:
+            self.resources.document('scenario', result['scenario'], [('previous_revision', 'scenario', previous)])
+        state, _ = self.resources.snapshot(result)
+        return dict(result, scenario_id=scenario_id, cues_id=state['cues_id'])
+
+    def asset_prompt(self, data):
+        result = asset_prompt(data)
+        scenario_id = self.resources.document('scenario', require_text(data, 'scenario'))
+        context = {key: result[key] for key in ('scene', 'chapter', 'kind', 'context')}
+        prompt_id = self.resources.prompt(result['prompt'], result['negative'],
+                                          source=scenario_id, context=context)
+        return dict(result, prompt_id=prompt_id, scenario_id=scenario_id)
+
+    def save_documents(self, data):
+        inputs = dict(data, cues=read_cues(data))
+        state, _ = self.resources.snapshot(inputs)
+        return {key: state[key] for key in ('source_id', 'scenario_id', 'cues_id')}
+
+
 def upload_path(directory, name):
     if (
         not isinstance(name, str) or not name or name != name.strip(' .')
@@ -71,13 +125,16 @@ def upload_path(directory, name):
     return directory / name
 
 
-def make_archive(data, root, resolve_image):
+def make_archive(data, root, resolve_image, *, resources=None, links=None):
     scenes = parse_scenario(require_text(data, 'scenario'))
     uploads = data.get('files', {})
     references = data.get('image_assets', {})
-    if not isinstance(uploads, dict) or not isinstance(references, dict):
+    registered = data.get('asset_ids', {})
+    if not all(isinstance(items, dict) for items in (uploads, references, registered)):
         raise ValueError('素材须为文件名映射。')
-    names = [upload_path(root, name).name for name in (*uploads, *references)]
+    if registered and resources is None:
+        raise ValueError('没有用于读取已登记素材的工作目录。')
+    names = [upload_path(root, name).name for name in (*uploads, *references, *registered)]
     if len(names) != len({name.casefold() for name in names}):
         raise ValueError('有重复的素材文件名。')
     assets = root / 'assets'
@@ -98,16 +155,28 @@ def make_archive(data, root, resolve_image):
         if Path(name).suffix.lower() != source.suffix.lower():
             raise ValueError('素材名须保留原图的扩展名。')
         shutil.copyfile(source, assets / name)
+    for name, ident in registered.items():
+        media = resources.asset(ident)
+        if Path(name).suffix.lower() != Path(media['name']).suffix.lower():
+            raise ValueError('素材名须保留原文件扩展名。')
+        shutil.copyfile(resources.asset_path(media), assets / name)
 
     font_name = require_text(data, 'font')
     font = upload_path(assets, font_name) if font_name else None
-    mapping = root / 'cues.json'
-    cues = data.get('cues', {})
-    if not isinstance(cues, (dict, str)):
-        raise ValueError('演出动作须为 JSON 对象或 JSON 文本。')
-    mapping.write_text((cues.strip() or '{}') if isinstance(cues, str) else json.dumps(cues, ensure_ascii=False),
-                       encoding='utf-8')
-    script, files = render_script(scenes, read_mapping(mapping), assets, font, confine_assets=True)
+    script, files = render_script(scenes, read_cues(data), assets, font, confine_assets=True)
     project = root / 'project'
     build_project(project, script, files)
+    if resources is not None and links is not None:
+        used = {}
+        for source in files.values():
+            name = source.name
+            if name in registered:
+                used[name] = registered[name]
+            elif name in references:
+                used[name] = resources.register_asset(name, artifact=references[name])['id']
+            else:
+                used[name] = resources.register_asset(name, blob=source.read_bytes())['id']
+        inputs = dict(data, assets=used, cues=read_cues(data))
+        _, provenance = resources.snapshot(inputs)
+        links.extend(provenance)
     return Path(shutil.make_archive(str(root / 'prisma-renpy'), 'zip', project))

@@ -1,5 +1,6 @@
 # Local reference games, novels, and assets.
 /[Rr]eference/
+/examples/*.txt
 /build/
 __pycache__/
 

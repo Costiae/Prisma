@@ -17,6 +17,7 @@
   let timer;
   let submitting = false;
   let datasetBusy = false;
+  let exportingLora = false;
   let trainingRankTouched = false;
   let trainingStepsTouched = false;
   let sourceItems = [];
@@ -24,6 +25,7 @@
   const addedImages = new Map();
   const uploadedCaptions = new Map();
   let lastGallery = '';
+  let selectedPrompt = null;
 
   function report(text, error = false) {
     get('status').textContent = text;
@@ -122,6 +124,7 @@
             : '新环境请展开本地工具箱，拉取推理组件或完整 LoRA 工具链。')
       : (catalog?.online.ready ? '生成时会把提示词发送给 OpenAI，并使用账户额度。' : '请设置服务端 OPENAI_API_KEY 并重启 WebUI。');
     get('generate').disabled = working || !ready;
+    get('export-lora').disabled = exportingLora || !value('lora');
     get('install').disabled = working || !environment?.supported || Boolean(environment.engine && environment.model);
     get('install-train').disabled = working || !environment?.training_supported
       || Boolean(installModel?.available && installModel?.trainer_available);
@@ -292,9 +295,8 @@
         if (uploads.has(name)) return report('图片已经在当前工程素材中。');
         add.disabled = true;
         try {
-          const response = await fetch(url);
-          if (!response.ok) throw new Error('无法读取候选图片。');
-          uploads.set(name, new File([await response.blob()], name, {type: 'image/png'}));
+          const saved = await registerMedia(name, {artifact: {job_id: job.id, name: item.name}});
+          useManagedMedia(name, saved.id);
           renderFiles();
           if (['show', 'background'].includes(action.value)) asset.value = name;
           report('图片已加入素材，可在「演出与素材」绑定到台词。');
@@ -345,6 +347,7 @@
       return report('该任务使用的 LoRA 已不可用。请重新导入权重。', true);
     }
     setMode(options.mode);
+    selectedPrompt = options.prompt_id || null;
     const values = {prompt: options.prompt, count: options.count};
     if (options.mode === 'local') {
       const size = `${options.width}x${options.height}`;
@@ -436,6 +439,25 @@
   get('install-train').onclick = () => submitJob('/install', {target: 'training', base_model: value('install-base')});
   get('form').querySelectorAll('[name="image-mode"]').forEach((input) => input.onchange = controls);
   get('compare').onchange = controls;
+  get('export-lora').onclick = async () => {
+    const lora = value('lora');
+    if (!lora || exportingLora) return;
+    exportingLora = true;
+    controls();
+    report('正在导出 LoRA 与训练资料…');
+    try {
+      const exported = await json('/loras/export', {loras: [lora]});
+      const download = document.createElement('a');
+      download.href = exported.url;
+      download.download = 'prisma-lora.zip';
+      download.click();
+      report('LoRA 迁移 ZIP 已生成。');
+    } catch (error) { report(error.message, true); }
+    finally {
+      exportingLora = false;
+      controls();
+    }
+  };
   get('lora').onchange = () => {
     get('weight').value = catalog?.loras.find((x) => x.id === value('lora'))?.weight ?? 0.35;
     const family = selectedLoraFamily();
@@ -453,7 +475,10 @@
   };
   get('preset').onchange = () => {
     const prompt = presets[value('preset')];
-    if (prompt) get('prompt').value = `${mode() === 'local' ? 'prismaCel, ' : ''}${prompt}`;
+    if (prompt) {
+      get('prompt').value = `${mode() === 'local' ? 'prismaCel, ' : ''}${prompt}`;
+      selectedPrompt = null;
+    }
     get('preset').value = '';
   };
   get('scene').onclick = async () => {
@@ -464,6 +489,7 @@
       const response = await request('/api/asset-prompt', {scenario: scenario.value, scene: scene.id, kind,
         line: selectedLine?.index ?? 1, brief: value('prompt').trim().slice(0, 3000)});
       const result = await response.json();
+      selectedPrompt = result.prompt_id;
       const context = result.context.map((line) => `${line.speaker ? `${line.speaker}：` : ''}${line.text}`).join('\n').slice(0, 700);
       get('prompt').value = `${result.prompt}\n\n场景参考（${result.chapter} · ${result.scene}）：\n${context}`.slice(0, 4000);
       get('prompt').focus();
@@ -485,6 +511,8 @@
   get('form').onsubmit = (event) => {
     event.preventDefault();
     const data = {mode: mode(), prompt: value('prompt'), count: numeric('count')};
+    if (selectedPrompt) data.prompt_id = selectedPrompt;
+    if (openProject) data.project_id = openProject.id;
     if (data.mode === 'local') {
       const [width, height] = value('local-size').split('x').map(Number);
       const loras = [value('lora')];
@@ -663,6 +691,168 @@
       report(`已导入 ${file.name}。`);
     } catch (error) { report(error.message, true); }
     finally { input.disabled = false; }
+  };
+
+  const libraryLabels = {project: '项目', revision: '项目版本', source: '原文', scenario: 'Scenario',
+    cues: '演出绑定', prompt: '提示词', asset: '媒体素材', tool: '工具', model: '模型', lora: 'LoRA',
+    dataset: '数据集', job: '任务', artifact: '产物', export: '导出'};
+  const libraryStates = {...stateLabels, installed: '已安装', not_installed: '未安装', remote: '在线', legacy: '历史数据'};
+  const relationLabels = {uses_model: '使用底模', uses_dataset: '使用数据集', uses_lora: '使用 LoRA',
+    continues_from: '续训起点', replay_of: '复跑来源', produced_by: '来源任务', weight_file: '权重文件',
+    derived_from: '数据集来源', includes: '包含', uses_prompt: '使用提示词', for_project: '所属项目',
+    uses_source: '使用原文', uses_scenario: '使用 Scenario', uses_cues: '使用演出绑定', uses_asset: '使用素材',
+    from_source: '原文来源', from_scenario: 'Scenario 来源', adapted_from: '改写自',
+    from_artifact: '来自产物', current_revision: '当前版本', previous_revision: '上一版',
+    for_scenario: '对应 Scenario', member_of: '所属数据集', uses_tool: '使用工具'};
+  const libraryPage = 20;
+  let libraryOffset = 0;
+  let libraryRequest = 0;
+
+  function libraryNode(tag, label) {
+    const node = document.createElement(tag);
+    node.textContent = label;
+    return node;
+  }
+
+  function libraryButton(label, action) {
+    const button = libraryNode('button', label);
+    button.type = 'button';
+    button.onclick = action;
+    return button;
+  }
+
+  async function libraryDetail(kind, id) {
+    const detail = get('library-detail');
+    const generation = ++libraryRequest;
+    detail.hidden = false;
+    detail.replaceChildren(libraryNode('p', '正在读取…'));
+    try {
+      const item = await json('/library/item', {kind, id});
+      if (generation !== libraryRequest) return;
+      detail.replaceChildren(libraryNode('h3', item.label), libraryNode('p', [
+        libraryLabels[item.kind], item.id, item.path, item.available === false ? '文件缺失' : null,
+      ].filter(Boolean).join(' · ')));
+      if (item.available && item.metadata.url?.startsWith('/api/')) {
+        const link = libraryNode('a', item.kind === 'artifact' ? '打开产物' : '下载');
+        link.href = item.metadata.url;
+        detail.append(link);
+      }
+      if (item.kind === 'job' && item.available) {
+        detail.append(libraryButton('查看任务和产物', async () => {
+          currentJob = item.id;
+          const history = get('history');
+          if (![...history.options].some((option) => option.value === item.id)) {
+            history.add(new Option(item.label, item.id));
+          }
+          history.value = item.id;
+          try { await show(item.id); history.focus(); }
+          catch (error) { report(error.message, true); }
+        }));
+      }
+      if ((item.kind === 'project' || item.kind === 'revision') && item.available) {
+        detail.append(libraryButton('打开到工作台', async () => {
+          try {
+            await loadProject(item.kind === 'project' ? item.id : item.metadata.project_id,
+              item.kind === 'revision' ? item.id : undefined);
+            field('project-name').focus();
+          } catch (error) { report(error.message, true); }
+        }));
+      }
+      if (item.kind === 'prompt' && item.metadata.prompt) {
+        detail.append(libraryButton('带入生成表单', () => {
+          get('prompt').value = item.metadata.prompt;
+          get('negative').value = item.metadata.negative || '';
+          selectedPrompt = item.id;
+          get('prompt').focus();
+        }));
+      }
+      if (item.kind === 'asset' && item.available) {
+        detail.append(libraryButton('加入当前项目素材', async () => {
+          try {
+            const saved = item.metadata.url?.startsWith('/api/workspace/assets/')
+              ? {id: item.id, name: item.metadata.name}
+              : await registerMedia(item.label, {library_id: item.id});
+            if (uploads.has(saved.name) && !confirm(`替换同名素材「${saved.name}」？`)) return;
+            useManagedMedia(saved.name, saved.id);
+            renderFiles();
+            report('素材已加入当前项目。');
+          } catch (error) { report(error.message, true); }
+        }));
+      }
+      const editor = {source: raw, scenario, cues}[item.kind];
+      const content = item.kind === 'cues' && item.metadata.cues
+        ? JSON.stringify(item.metadata.cues, null, 2) : item.metadata.text;
+      if (editor && typeof content === 'string') {
+        detail.append(libraryButton('载入编辑器', () => {
+          if (editor.value.trim() && editor.value !== content && !confirm('替换编辑框中的文本？')) return;
+          editor.value = content;
+          editor.dispatchEvent(new Event('input'));
+          editor.focus();
+        }));
+      }
+      if (item.links.length) {
+        detail.append(libraryNode('h4', '关联记录'));
+        const links = libraryNode('ul', '');
+        links.className = 'library-rows';
+        for (const link of item.links) {
+          const title = `${link.direction === 'in' ? '引用此记录' : relationLabels[link.relation] || link.relation} · ${libraryLabels[link.kind]} · ${link.label || link.id}`;
+          const row = libraryNode('li', '');
+          row.append(link.label ? libraryButton(title, () => libraryDetail(link.kind, link.id)) : libraryNode('span', title));
+          links.append(row);
+        }
+        detail.append(links);
+      }
+      const metadata = libraryNode('details', '');
+      metadata.append(libraryNode('summary', '记录参数'), libraryNode('pre', JSON.stringify(item.metadata, null, 2)));
+      detail.append(metadata);
+    } catch (error) {
+      if (generation === libraryRequest) detail.replaceChildren(libraryNode('p', error.message));
+    }
+  }
+
+  async function loadLibrary(offset = 0) {
+    const generation = ++libraryRequest;
+    const status = get('library-status');
+    get('library-detail').hidden = true;
+    get('library-rows').replaceChildren();
+    get('library-prev').disabled = true;
+    get('library-next').disabled = true;
+    status.textContent = '正在查询…';
+    const filters = {query: value('library-query').trim(), offset, limit: libraryPage};
+    if (value('library-kind')) filters.kind = value('library-kind');
+    try {
+      const result = await json('/library/list', filters);
+      if (generation !== libraryRequest) return;
+      libraryOffset = offset;
+      status.textContent = result.items.length ? `${offset + 1}–${offset + result.items.length} / ${result.total} 条` : '没有匹配的记录';
+      get('library-prev').disabled = offset === 0;
+      get('library-next').disabled = offset + libraryPage >= result.total;
+      get('library-rows').replaceChildren(...result.items.map((item) => {
+        const row = libraryNode('li', '');
+        const state = item.available === false ? '文件缺失' : libraryStates[item.state];
+        const title = [libraryLabels[item.kind], item.label, state].filter(Boolean).join(' · ');
+        row.append(libraryButton(title, () => libraryDetail(item.kind, item.id)));
+        return row;
+      }));
+    } catch (error) {
+      if (generation === libraryRequest) status.textContent = error.message;
+    }
+  }
+
+  get('library').ontoggle = () => { if (get('library').open) loadLibrary(); };
+  get('library-search').onsubmit = (event) => { event.preventDefault(); loadLibrary(); };
+  get('library-kind').onchange = () => loadLibrary();
+  get('library-prev').onclick = () => loadLibrary(Math.max(0, libraryOffset - libraryPage));
+  get('library-next').onclick = () => loadLibrary(libraryOffset + libraryPage);
+  get('library-sync').onclick = async () => {
+    const button = get('library-sync');
+    button.disabled = true;
+    try {
+      const result = await json('/library/refresh', {});
+      await loadLibrary();
+      if (result.skipped) report(`有 ${result.skipped} 条本机记录无法读取。`, true);
+    } catch (error) { report(error.message, true); }
+    finally { button.disabled = false; }
   };
 
   controls();

@@ -18,6 +18,9 @@ NAME = r"[\w·・？-]+"
 DIALOGUE = re.compile(rf"(?P<name>{NAME})(?:\s*(?:（[^（）]*）|\([^()]*\)))?\s*[：:]\s*(?P<text>\S.*)")
 RAW_QUOTE = re.compile(r"「[^「」]*(?:「[^「」]*」[^「」]*)*」")
 UNKNOWN = "？"
+LINE_MARKER = "<!-- prisma:line"
+LINE_ID = re.compile(r"<!-- prisma:line ([a-zA-Z0-9][a-zA-Z0-9_-]{0,63}) -->")
+LINE_CUES = "by_line_id"
 
 
 @dataclass
@@ -25,6 +28,7 @@ class Line:
     text: str
     source: int
     speaker: str | None = None
+    id: str | None = None
 
 
 @dataclass
@@ -54,7 +58,7 @@ def draft_scenario(raw: str, speakers: dict, from_heading: str | None) -> tuple[
                 if speaker == UNKNOWN:
                     pending.append(number)
                 line = f"{speaker}：{line[1:-1]}"
-        elif line.startswith("\\") or DIALOGUE.fullmatch(line):
+        elif line.startswith(("\\", LINE_MARKER)) or DIALOGUE.fullmatch(line):
             line = "\\" + line
         paragraphs.append(line.replace("\n", "\n  "))
         scene_has_text = True
@@ -116,9 +120,16 @@ def parse_scenario(source: str, *, allow_unresolved: bool = False) -> list[Scene
     scene_number = 1
     heading_seen = False
     continuation = None
+    pending_id = None
+    line_ids = set()
 
     for number, raw_line in enumerate(source.splitlines(), 1):
         line = raw_line.strip()
+        if pending_id and (
+            not line or line.startswith(LINE_MARKER) or line == "---"
+            or CHAPTER.fullmatch(line) or VIEWPOINT.fullmatch(line)
+        ):
+            raise ValueError(f"Scenario line {number - 1}: line ID must immediately precede a text item")
         if not line:
             continuation = None
             continue
@@ -126,7 +137,15 @@ def parse_scenario(source: str, *, allow_unresolved: bool = False) -> list[Scene
             continuation.text += "\n" + line
             continue
         continuation = None
-        if match := CHAPTER.fullmatch(line):
+        if line.startswith(LINE_MARKER):
+            match = LINE_ID.fullmatch(line)
+            if not match:
+                raise ValueError(f"Scenario line {number}: malformed line ID")
+            pending_id = match[1]
+            if pending_id in line_ids:
+                raise ValueError(f"Scenario line {number}: duplicate line ID {pending_id}")
+            line_ids.add(pending_id)
+        elif match := CHAPTER.fullmatch(line):
             if scene.lines:
                 scenes.append(scene)
             if heading_seen or scene.lines:
@@ -145,23 +164,50 @@ def parse_scenario(source: str, *, allow_unresolved: bool = False) -> list[Scene
         elif match := DIALOGUE.fullmatch(line):
             if match["name"] == UNKNOWN and not allow_unresolved:
                 raise ValueError(f"Scenario line {number}: fill in the speaker name")
-            continuation = Line(match["text"], number, match["name"])
-            scene.lines.append(continuation)
+            continuation = Line(match["text"], number, match["name"], pending_id)
         else:
             if line.startswith("\\"):
                 escaped = line[1:]
-                if escaped.startswith("\\") or escaped == "---" or any(
+                if escaped.startswith(("\\", LINE_MARKER)) or escaped == "---" or any(
                     rule.fullmatch(escaped) for rule in (CHAPTER, VIEWPOINT, DIALOGUE)
                 ):
                     line = escaped
-            continuation = Line(line, number)
+            continuation = Line(line, number, id=pending_id)
+        if continuation is not None:
             scene.lines.append(continuation)
+            pending_id = None
 
+    if pending_id:
+        raise ValueError(f"Scenario line {number}: line ID must immediately precede a text item")
     if scene.lines:
         scenes.append(scene)
     if not scenes:
         raise ValueError("Scenario contains no playable text")
     return scenes
+
+
+def anchor_scenario(source: str, cues: dict) -> tuple[str, dict]:
+    """Persist text item IDs in Markdown and convert existing cues to those IDs."""
+    scenes = parse_scenario(source, allow_unresolved=True)
+    positions = resolve_cues(scenes, cues)
+    checksum = hashlib.sha256(source.encode()).hexdigest()[:16]
+    newline = re.search(r"\r\n|\r|\n", source)
+    separator = newline[0] if newline else "\n"
+    prefixes = {}
+    bindings = {}
+    for scene in scenes:
+        for index, line in enumerate(scene.lines, 1):
+            identifier = line.id
+            if identifier is None:
+                identifier = f"line-{checksum}-{line.source}"
+                prefixes[line.source] = f"{LINE_MARKER} {identifier} -->{separator}"
+            if str(index) in positions[scene.id]:
+                commands = positions[scene.id][str(index)]
+                if not isinstance(commands, list):
+                    raise ValueError(f"scene {scene.id}, item {index}: expected a cue list")
+                bindings[identifier] = commands
+    source = "".join(prefixes.get(i, "") + row for i, row in enumerate(source.splitlines(keepends=True), 1))
+    return source, {LINE_CUES: bindings} if bindings else {}
 
 
 def quoted(value: str, *, dialogue: bool = False) -> str:
@@ -175,19 +221,52 @@ def quoted(value: str, *, dialogue: bool = False) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def read_mapping(path: Path) -> dict:
+def decode_mapping(text: str, label: str) -> dict:
     def unique_keys(pairs):
         result = {}
         for key, value in pairs:
             if key in result:
-                raise ValueError(f"{path}: duplicate key {key!r}")
+                raise ValueError(f"{label}: duplicate key {key!r}")
             result[key] = value
         return result
 
-    data = json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=unique_keys)
+    data = json.loads(text, object_pairs_hook=unique_keys)
     if not isinstance(data, dict):
-        raise ValueError(f"{path}: expected a JSON object")
+        raise ValueError(f"{label}: expected a JSON object")
     return data
+
+
+def read_mapping(path: Path) -> dict:
+    return decode_mapping(path.read_text(encoding="utf-8-sig"), str(path))
+
+
+def resolve_cues(scenes: list[Scene], cues: dict) -> dict:
+    if unknown := cues.keys() - {LINE_CUES, *(scene.id for scene in scenes)}:
+        raise ValueError(f"unknown scene in cues: {', '.join(sorted(unknown))}")
+    positions = {}
+    identifiers = {}
+    for scene in scenes:
+        scene_cues = cues.get(scene.id, {})
+        if not isinstance(scene_cues, dict):
+            raise ValueError(f"scene {scene.id}: expected an object of cue lists")
+        if unknown := scene_cues.keys() - {str(index) for index in range(1, len(scene.lines) + 1)}:
+            raise ValueError(f"scene {scene.id}: unknown text item in cues: {', '.join(sorted(unknown))}")
+        positions[scene.id] = scene_cues.copy()
+        for index, line in enumerate(scene.lines, 1):
+            if line.id is not None:
+                identifiers[line.id] = (scene.id, str(index))
+
+    anchored = cues.get(LINE_CUES, {})
+    if not isinstance(anchored, dict):
+        raise ValueError(f"{LINE_CUES}: expected an object of cue lists")
+    if unknown := anchored.keys() - identifiers.keys():
+        raise ValueError(f"unknown line ID in cues: {', '.join(sorted(unknown))}")
+    for identifier, commands in anchored.items():
+        scene, index = identifiers[identifier]
+        if index in positions[scene]:
+            raise ValueError(f"scene {scene}, item {index}: cues use both a position and line ID {identifier}")
+        positions[scene][index] = commands
+    return positions
 
 
 def render_script(
@@ -197,6 +276,7 @@ def render_script(
     images = {".png", ".jpg", ".jpeg", ".webp"}
     audio = {".ogg", ".opus", ".mp3", ".wav", ".flac"}
     files = {}
+    positions = resolve_cues(scenes, cues)
 
     def add_asset(source: Path, extensions: set[str], context: str) -> str:
         suffix = source.suffix.lower()
@@ -243,17 +323,10 @@ def render_script(
         for style in ("say_dialogue", "say_label"):
             headers.extend((f"style {style}:", f"    font {font_path}"))
 
-    if unknown := cues.keys() - {scene.id for scene in scenes}:
-        raise ValueError(f"unknown scene in cues: {', '.join(sorted(unknown))}")
-
     for scene_index, scene in enumerate(scenes):
         label = scene.id.replace(":", "_")
         body.extend((f"# {scene.id} {scene.chapter}", f"label scene_{label}:"))
-        scene_cues = cues.get(scene.id, {})
-        if not isinstance(scene_cues, dict):
-            raise ValueError(f"scene {scene.id}: expected an object of cue lists")
-        if unknown := scene_cues.keys() - {str(i) for i in range(1, len(scene.lines) + 1)}:
-            raise ValueError(f"scene {scene.id}: unknown text item in cues: {', '.join(sorted(unknown))}")
+        scene_cues = positions[scene.id]
 
         for index, line in enumerate(scene.lines, 1):
             body.append(f"    # {scene.id}/{index} (Scenario line {line.source})")
@@ -336,12 +409,14 @@ def build_project(output: Path, script: str, files: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--workspace", type=Path, help="Prisma workspace for cataloging source and outputs")
     commands = parser.add_subparsers(dest="command", required=True)
     draft = commands.add_parser("draft", help="prepare an editable Scenario from raw text")
     draft.add_argument("raw", type=Path)
     draft.add_argument("output", type=Path)
     draft.add_argument("--speakers", type=Path, help="JSON mapping raw line numbers to speaker names")
     draft.add_argument("--from-heading", help="start at this exact heading, including '# '")
+    draft.add_argument("--line-ids", action="store_true", help="include stable text item IDs for cue bindings")
     build = commands.add_parser("build", help="turn a reviewed Scenario into a Ren'Py project")
     build.add_argument("scenario", type=Path)
     build.add_argument("output", type=Path)
@@ -350,9 +425,15 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
+        from image_toolkit import ImageToolkit
+        from prisma_workflow import StudioWorkflow
+
+        toolkit = ImageToolkit(Path(__file__).resolve().parent, workspace=args.workspace)
         if args.command == "draft":
             speakers = read_mapping(args.speakers) if args.speakers else {}
-            scenario, pending = draft_scenario(args.raw.read_text(encoding="utf-8-sig"), speakers, args.from_heading)
+            result = StudioWorkflow(toolkit.resources).draft(dict(raw=args.raw.read_text(encoding="utf-8-sig"),
+                speakers=speakers, heading=args.from_heading or "", line_ids=args.line_ids))
+            scenario, pending = result["scenario"], result["pending"]
             args.output.parent.mkdir(parents=True, exist_ok=True)
             with args.output.open("x", encoding="utf-8", newline="\n") as stream:
                 stream.write(scenario)
@@ -363,11 +444,18 @@ def main() -> None:
                     preview += ", ..."
                 print(f"Speaker review needed for {len(pending)} quotes (raw lines: {preview})")
         else:
-            scenes = parse_scenario(args.scenario.read_text(encoding="utf-8-sig"))
+            from secrets import token_hex
+
+            text = args.scenario.read_text(encoding="utf-8-sig")
+            scenes = parse_scenario(text)
             cues = read_mapping(args.cues) if args.cues else {}
             assets_dir = args.cues.parent if args.cues else args.scenario.parent
             script, files = render_script(scenes, cues, assets_dir, args.font)
             build_project(args.output, script, files)
+            _, links = toolkit.resources.snapshot(dict(scenario=text, cues=cues))
+            for file in dict.fromkeys(files.values()):
+                links.append(("uses_asset", "asset", toolkit.resources.record_local_asset(file)))
+            toolkit.record_export(token_hex(8), args.output.resolve(), "renpy", links=links)
             print(f"Script: {args.output / 'game' / 'script.rpy'}")
     except (OSError, ValueError) as error:
         parser.exit(2, f"prisma: {error}\n")

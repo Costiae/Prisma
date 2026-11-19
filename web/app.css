@@ -264,3 +264,25 @@ section[id], .panel[id] { scroll-margin-top: 14px; }
   .flow-inspector { grid-template-columns: 1fr; }
   .inspector-current { grid-column: 1; margin-top: 0; }
 }
+.library-rows {
+  display: grid;
+  gap: .35rem;
+  padding: 0;
+  list-style: none;
+}
+
+.library-rows button {
+  max-width: 100%;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+#image-library-detail {
+  overflow-wrap: anywhere;
+}
+
+#image-library-detail pre {
+  white-space: pre-wrap;
+  max-height: 24rem;
+  overflow: auto;
+}

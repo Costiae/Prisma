@@ -104,9 +104,11 @@ MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 
 
 ## 从 Scenario 到成品
 
-1. `scenario_draft` 接收 `raw` 和可选的说话人映射。人工校对 `scenario` 后，用 `scenario_inspect` 取得场景和行号。
+1. `scenario_draft` 接收 `raw` 和可选的说话人映射。传入 `line_ids: true` 可在草稿中写入稳定的文本 ID。人工校对 `scenario` 后，用 `scenario_inspect` 取得场景、行号和已有的文本 ID。
 2. `scenario_asset_prompt` 接收 `scenario`、场景 ID、`kind`（`background`、`sprite` 或 `cg`）和可选的 `line`、`brief`、`trigger`。它返回提示词和附近的剧本台词，供确认构图与人物细节后生成。
 3. 在在线或本地路线挑图后，调用 `renpy_export`。`cues` 和 WebUI 同格式，每个生成素材通过 `image_assets` 映射到任务与文件。`renpy_export` 返回磁盘路径和下载地址。
+
+已有 Scenario 可以调用 `scenario_anchor`，传入 `scenario` 和可选的 `cues`。它按当前条目编号转换绑定，并返回须一起保存的 `scenario` 和 `cues`。导出时可用 `by_line_id` 保存以文本 ID 为键的动作列表，插入文本或调整场景次序后仍指向原条目。重新填写一句已配音的台词时，复核该 ID 上的配音。若删除了仍有绑定的 ID，导出会指出该 ID。
 
 要在 `1:1` 的第一句切换背景，可以给 `renpy_export` 传以下字段，并带上完整的 `scenario`。
 

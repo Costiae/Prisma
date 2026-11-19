@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import threading
 import uuid
@@ -15,6 +16,7 @@ import uuid
 
 ACTIVE = {'running', 'cancelling'}
 JOB_ID = re.compile(r'[0-9a-f]{16}')
+INDEX_PROJECTION = 2
 
 
 class Cancelled(Exception):
@@ -60,9 +62,10 @@ def own_workspace(directory: Path):
 
 
 class Job:
-    def __init__(self, directory: Path, kind: str, options: dict):
+    def __init__(self, directory: Path, kind: str, options: dict, index):
         self.directory = directory
         self.log = directory / 'job.log'
+        self.index = index
         self.data = dict(id=directory.name, kind=kind, options=options, state='running',
                          started=now(), phase='正在准备', images=[], checkpoints=[])
         self.lock = threading.RLock()
@@ -75,6 +78,10 @@ class Job:
         with self.lock:
             self.data.update(fields)
             write_json(self.directory / 'job.json', self.data)
+            try:
+                self.index(self.directory, self.data)
+            except (OSError, sqlite3.Error, ValueError):
+                logging.exception('Could not index job %s', self.directory.name)
 
     def check(self):
         if self.stop.is_set():
@@ -123,16 +130,19 @@ class Job:
 
 
 class Jobs:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, library, index):
         self.root = root
+        self.library = library
+        self.index = index
         self.lock = threading.Lock()
         self.active = None
+        self.index_ready = False
 
     def start(self, kind: str, options: dict, work: Callable):
         with self.lock:
             if self.active is not None and self.active.data['state'] in ACTIVE:
                 raise Busy('有一个图像任务正在运行；完成或取消后即可开始下一个。')
-            job = self.active = Job(self.root / uuid.uuid4().hex[:16], kind, options)
+            job = self.active = Job(self.root / uuid.uuid4().hex[:16], kind, options, self.index)
             threading.Thread(target=self._run, args=(job, work), daemon=True).start()
             return self.get(job.directory.name)
 
@@ -184,15 +194,42 @@ class Jobs:
         return data
 
     def recent(self):
-        directories = sorted(self.root.glob('*/job.json'), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not self.index_ready:
+            self.refresh_index()
         result = []
-        for path in directories[:24]:
+        for row in self.library.list(kind='job', limit=24)['items']:
             try:
-                job = self.get(path.parent.name)
-            except (OSError, ValueError):
+                job = self.get(row['id'])
+            except (OSError, ValueError, KeyError):
                 continue
             result.append({key: job[key] for key in ('id', 'kind', 'state', 'phase', 'started')})
         return result
+
+    def refresh_index(self):
+        indexed = self.library.owners('job:')
+        skipped = 0
+        for file in self.root.glob('*/job.json'):
+            ident = file.parent.name
+            if not JOB_ID.fullmatch(ident) or not file.resolve().is_relative_to(self.root.resolve()):
+                continue
+            owner = f'job:{ident}'
+            try:
+                active = self.active
+                with active.lock if active and active.directory == file.parent else nullcontext():
+                    stat = file.stat()
+                    if indexed.get(owner) != [stat.st_mtime_ns, stat.st_size, INDEX_PROJECTION]:
+                        data = json.loads(file.read_text(encoding='utf-8'))
+                        if data['id'] != ident:
+                            raise ValueError('Job ID does not match its directory.')
+                        self.index(file.parent, data)
+                indexed.pop(owner, None)
+            except (OSError, ValueError, KeyError, TypeError):
+                skipped += 1
+        for owner in indexed:
+            if not (self.root / owner.removeprefix('job:') / 'job.json').is_file():
+                self.library.replace(owner, [])
+        self.index_ready = True
+        return skipped
 
     def cancel(self, ident):
         active = self.active

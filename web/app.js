@@ -7,7 +7,10 @@ const action = field('action');
 const asset = field('asset');
 const font = field('font');
 const cues = field('cues');
+const lineCues = 'by_line_id';
 const uploads = new Map();
+const managedAssets = new WeakMap();
+let openProject = null;
 let selectedPipelineNode = null;
 let exported = false;
 const imageExtensions = /\.(png|jpe?g|webp)$/i;
@@ -212,7 +215,7 @@ function renderLines() {
     row.addEventListener('click', () => {
       list.querySelector('[aria-pressed="true"]')?.setAttribute('aria-pressed', 'false');
       row.setAttribute('aria-pressed', 'true');
-      selectedLine = {scene: scene.id, index: index + 1, speaker: line.speaker};
+      selectedLine = {scene: scene.id, index: index + 1, speaker: line.speaker, id: line.id};
       if (line.speaker && line.speaker !== '？') field('actor').value = line.speaker;
       refreshCueForm();
       updatePipeline();
@@ -314,6 +317,7 @@ field('draft').addEventListener('click', (event) => {
       raw: raw.value,
       heading: field('heading').value,
       speakers: mapping(field('speakers').value, '说话人映射'),
+      line_ids: true,
     });
     const result = await response.json();
     if (scenario.value !== previous) throw new Error('生成期间 Scenario 已编辑，请重新生成或先下载当前稿。');
@@ -326,18 +330,34 @@ field('draft').addEventListener('click', (event) => {
 scenario.addEventListener('input', () => { exported = false; invalidateScenes(); });
 cues.addEventListener('input', () => { exported = false; updatePipeline(); });
 field('inspect').addEventListener('click', (event) => run(event.currentTarget, '正在解析场景…', () => inspectScenario()));
-field('save-scenario').addEventListener('click', () => {
+field('anchor-scenario').addEventListener('click', (event) => run(event.currentTarget, '正在固定演出位置…', async () => {
+  const text = scenario.value;
+  const plan = cues.value;
+  const response = await request('/api/scenario/anchor', {scenario: text, cues: plan});
+  const result = await response.json();
+  if (scenario.value !== text || cues.value !== plan) throw new Error('固定期间剧本或演出已编辑，请重试。');
+  scenario.value = result.scenario;
+  cues.value = JSON.stringify(result.cues, null, 2);
+  exported = false;
+  invalidateScenes();
+  await inspectScenario(result.scenario);
+  if (inspectedText === result.scenario) message('已固定演出位置。请一同保存 Scenario 和演出 JSON。');
+}));
+field('save-scenario').addEventListener('click', (event) => {
   if (!scenario.value.trim()) return message('请先填写 Scenario。', true);
-  download(new Blob([scenario.value], {type: 'text/markdown;charset=utf-8'}), 'scenario.md');
+  run(event.currentTarget, '正在保存 Scenario…', async () => {
+    const text = scenario.value;
+    await request('/api/scenario/save', {raw: raw.value, scenario: text});
+    download(new Blob([text], {type: 'text/markdown;charset=utf-8'}), 'scenario.md');
+    message('Scenario 已登记并下载。');
+  });
 });
-field('save-cues').addEventListener('click', () => {
-  try {
-    mapping(cues.value, '演出 JSON');
-    download(new Blob([cues.value.trim() || '{}'], {type: 'application/json'}), 'cues.json');
-  } catch (error) {
-    message(error.message, true);
-  }
-});
+field('save-cues').addEventListener('click', (event) => run(event.currentTarget, '正在保存演出绑定…', async () => {
+  const text = cues.value.trim() || '{}';
+  await request('/api/scenario/save', {scenario: scenario.value, cues: mapping(text, '演出 JSON')});
+  download(new Blob([text], {type: 'application/json'}), 'cues.json');
+  message('演出绑定已登记并下载。');
+}));
 sceneSelect.addEventListener('change', () => {
   selectedLine = null;
   renderLines();
@@ -369,14 +389,84 @@ function renderFiles() {
   updatePipeline();
 }
 
-field('files').addEventListener('change', (event) => {
+async function registerMedia(name, data) {
+  const response = await request('/api/workspace/assets/import', {name, ...data});
+  return response.json();
+}
+
+function useManagedMedia(name, id, file = new File([], name)) {
+  managedAssets.set(file, id);
+  uploads.set(name, file);
+}
+
+field('files').addEventListener('change', async (event) => {
   const files = [...event.target.files];
   event.target.value = '';
   const duplicate = files.find((file) => uploads.has(file.name));
   if (duplicate && !confirm(`替换已添加的同名素材，例如 ${duplicate.name}？`)) return;
-  for (const file of files) uploads.set(file.name, file);
-  renderFiles();
+  event.target.disabled = true;
+  try {
+    for (const file of files) {
+      if (file.size > 45 * 1024 * 1024) throw new Error(`素材「${file.name}」超过 45 MiB。`);
+      const resource = await registerMedia(file.name, {data: await encode(file)});
+      useManagedMedia(file.name, resource.id, file);
+    }
+    if (files.length) message('素材已登记到资源目录。');
+  } catch (error) { message(error.message, true); }
+  finally { renderFiles(); event.target.disabled = false; }
 });
+
+async function refreshProjects() {
+  const response = await request('/api/images/library/list', {kind: 'project', limit: 100});
+  const {items} = await response.json();
+  const select = field('project-select');
+  const selected = openProject?.id || select.value;
+  select.replaceChildren(new Option('选择项目', ''), ...items.map((item) => new Option(item.label, item.id)));
+  select.value = selected;
+}
+
+async function loadProject(id, revision) {
+  if (!id) throw new Error('请选择要打开的项目。');
+  const response = await request('/api/workspace/project/open', {id, revision});
+  const project = await response.json();
+  openProject = {id: project.id, revision: project.revision};
+  field('project-name').value = project.title;
+  field('project-save-copy').disabled = false;
+  raw.value = project.raw;
+  scenario.value = project.scenario;
+  cues.value = JSON.stringify(project.cues, null, 2);
+  field('heading').value = project.heading;
+  field('speakers').value = JSON.stringify(project.speakers, null, 2);
+  uploads.clear();
+  for (const [name, assetId] of Object.entries(project.assets)) useManagedMedia(name, assetId);
+  invalidateScenes();
+  renderFiles();
+  font.value = project.font;
+  await refreshProjects();
+  message(`已打开「${project.title}」。`);
+}
+
+async function saveProject(copy = false) {
+  const title = field('project-name').value.trim();
+  const assets = Object.fromEntries([...uploads].map(([name, file]) => [name, managedAssets.get(file)]));
+  const data = {
+    ...(copy ? {} : openProject), title, raw: raw.value, scenario: scenario.value,
+    cues: mapping(cues.value, '演出 JSON'), assets, font: font.value, heading: field('heading').value,
+    speakers: mapping(field('speakers').value, '说话人映射'),
+  };
+  const response = await request('/api/workspace/project/save', data);
+  const project = await response.json();
+  openProject = {id: project.id, revision: project.revision};
+  field('project-save-copy').disabled = false;
+  await refreshProjects();
+  message(`已保存「${project.title}」。`);
+}
+
+field('project-save').onclick = (event) => run(event.currentTarget, '正在保存项目…', () => saveProject());
+field('project-save-copy').onclick = (event) => run(event.currentTarget, '正在另存项目…', () => saveProject(true));
+field('project-open').onclick = (event) => run(event.currentTarget, '正在读取项目…',
+  () => loadProject(field('project-select').value));
+refreshProjects().catch((error) => message(error.message, true));
 action.addEventListener('change', refreshCueForm);
 font.addEventListener('change', () => { exported = false; updatePipeline(); });
 
@@ -397,9 +487,17 @@ field('cue-form').addEventListener('submit', (event) => {
     if (kind === 'hide') cue = {hide: actor};
     if (kind === 'stop') cue = {music: null};
     const plan = mapping(cues.value, '演出 JSON');
-    const scene = (plan[selectedLine.scene] ??= {});
-    if (typeof scene !== 'object' || Array.isArray(scene)) throw new Error('该场景须包含按条目编号的动作。');
-    const commands = (scene[selectedLine.index] ??= []);
+    const {scene, index, id} = selectedLine;
+    const positional = plan[scene]?.[index] !== undefined;
+    if (positional && id && plan[lineCues] && Object.hasOwn(plan[lineCues], id)) {
+      throw new Error('该条目同时用了编号和 ID，请保留一组演出动作。');
+    }
+    const useId = id && !positional;
+    const group = (plan[useId ? lineCues : scene] ??= {});
+    if (typeof group !== 'object' || Array.isArray(group)) throw new Error('演出绑定须为 JSON 对象。');
+    const key = useId ? id : index;
+    if (!Object.hasOwn(group, key)) group[key] = [];
+    const commands = group[key];
     if (!Array.isArray(commands)) throw new Error('该条目的演出动作需要一个数组。');
     if (kind === 'voice' && commands.some((command) => command && 'voice' in Object(command))) {
       throw new Error('这句已绑定配音，可在演出 JSON 中修改。');
@@ -432,7 +530,7 @@ field('build').addEventListener('click', (event) => run(event.currentTarget, '�
   const chosenFont = font.value;
   const referenced = new Set(chosenFont ? [chosenFont] : []);
   for (const scene of Object.values(plan)) {
-    if (!scene || typeof scene !== 'object' || Array.isArray(scene)) throw new Error('每个场景须包含按条目编号的动作。');
+    if (!scene || typeof scene !== 'object' || Array.isArray(scene)) throw new Error('每组演出绑定须为 JSON 对象。');
     for (const commands of Object.values(scene)) {
       if (!Array.isArray(commands)) throw new Error('每个文本条目的演出动作须为数组。');
       for (const cue of commands) {
@@ -446,17 +544,16 @@ field('build').addEventListener('click', (event) => run(event.currentTarget, '�
       }
     }
   }
-  const files = [];
+  const assetIds = {};
   for (const name of referenced) {
     const file = uploads.get(name);
     if (!file) throw new Error(`请添加素材文件「${name}」。`);
-    files.push(file);
+    assetIds[name] = managedAssets.get(file);
+    if (!assetIds[name]) throw new Error(`素材「${name}」尚未登记。`);
   }
-  if (files.reduce((total, file) => total + file.size, 0) > 45 * 1024 * 1024) {
-    throw new Error('选中的素材超过 45 MiB，请减少素材或使用命令行构建。');
-  }
-  const encoded = Object.fromEntries(await Promise.all(files.map(async (file) => [file.name, await encode(file)])));
-  const response = await request('/api/build', {scenario: text, cues: planText, font: chosenFont, files: encoded});
+  const response = await request('/api/build', {
+    scenario: text, cues: planText, font: chosenFont, asset_ids: assetIds, project_id: openProject?.id,
+  });
   download(await response.blob(), 'prisma-renpy.zip');
   exported = true;
   updatePipeline();
