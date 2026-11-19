@@ -24,15 +24,15 @@ python webui.py
 
 | 模式 | 使用方法 |
 | --- | --- |
-| 本地模型 | 使用 Windows x64 的 Vulkan 推理工具和 Anything V3（SD 1.x）底模。展开「本地工具箱」安装缺少的组件，或复用已有安装。可设置负面提示词、分辨率、Seed、步数、CFG、采样器和 LoRA 权重。 |
+| 本地模型 | Windows x64 使用 Vulkan 推理和 CUDA 训练；Apple Silicon Mac 可用 MPS 训练 SD 1.x/SDXL LoRA，也可用 Apple MLX 在 512 分辨率训练 Iris-3B 或动漫专用 Anima Base LoRA，并通过 MLX 本地生成。 |
 | 在线模型 | 在启动 `webui.py` 的进程环境中设置 `OPENAI_API_KEY`，再切换到「在线模型」。请求走 OpenAI 图像 API，会发送提示词并使用账户额度。密钥只留在服务端环境中。 |
 
 本地模式会查找 `E:\LLM\prisma-media`（可用 `PRISMA_MEDIA_HOME` 指定已有安装的位置）和本项目以往的 R1/R2/R3 权重。选择「套用 R2 / R3 对照配置」可按相同 Seed 比较 R2、R3 各自 200 步、0.35 权重的结果。两支权重相互独立，可以分别继续使用。
 
-LoRA 工具箱可自动拉取 Vulkan 推理工具、约 2.13 GB 的底模，以及训练用的 Python 3.10.20、CUDA 版 PyTorch、sd-scripts 和 CLIP 分词文件。安装会核对模型与工具的下载校验值，并按版本锁安装训练依赖。训练需要支持 CUDA 12.4 的 NVIDIA 驱动，首次安装需联网并预留下载和解压空间。工具箱还可以：
+LoRA 工具箱可自动拉取约 2.13 GB 的 Anything V3 或 6.94 GB 的 Animagine XL 4.0 Opt（动漫专用 SDXL checkpoint），以及训练用的 Python 3.10.20、PyTorch、sd-scripts 和对应的 CLIP 分词文件。Windows 使用 CUDA 12.4 与 8-bit AdamW；Apple Silicon 使用 PyTorch 2.8 MPS 与标准 AdamW。Iris-3B 与 Anima 使用独立的 Apple MLX 环境，固定 Python 3.13 和 MFlux 提交 `02b92461ec246ec44f5149b5dc3f69817a263a67`。Iris 下载约 20 GB；Anima Base 下载动漫底模、VAE 和分词器，合计约 5.7 GB。Anima Base 固定到官方仓库提交 `457fbf842cb86e96af72c65bdd13e3f1c448de84`，训练输出为 ComfyUI 兼容 LoRA。Anima 模型与衍生权重仅限非商业用途。训练任务会记录模型提交、权重校验值、依赖版本和数据集清单。首次安装需联网并预留下载和解压空间。工具箱还可以：
 
 1. 从 `Reference/Img`、R2/R3 原训练集或上传的图片选择训练素材，编辑每张图的标注并保存为独立数据集。
-2. 设置步数、保存间隔、Rank、学习率、重复次数和 Seed，从底模训练新分支。可查看日志或取消本地任务。训练完成后，可下载中间和最终 checkpoint，或从 LoRA 下拉框选中新权重直接试画。
+2. 选择 SD 1.x、SDXL、Iris-3B Base 或 Anima Base，设置步数、保存间隔、Rank、学习率和 Seed，训练独立分支。Iris 和 Anima 使用 512 分辨率、batch size 1、梯度检查点和 2 GB MLX 缓存；步数会按数据集大小取整为完整轮次。Anima 默认 Rank 16、25 个数据轮次，并使用其全部 28 层的注意力、MLP 与 AdaLN 模块。可查看日志或取消本地任务。训练完成后，可下载预览图与 checkpoint；Apple Silicon 可直接用 MLX 生成 Anima Base 与 LoRA 对照图。
 3. 导入兼容 SD 1.x 的 `.safetensors` LoRA。大于 45 MiB 的文件可直接复制到 `build/prisma-images/loras`，再刷新环境。
 
 新下载、数据集、任务日志、出图和训练权重默认写在 `build/prisma-images/`；可通过 `--image-workspace` 自定义位置。工具箱不会改动原参考图或既有 R2/R3 训练结果。

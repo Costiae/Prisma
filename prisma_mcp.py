@@ -58,8 +58,9 @@ class PrismaMCP:
               'brief': TEXT, 'trigger': TEXT}, ('scenario', 'scene', 'kind'), read_only=True)
         tool('image_catalog', 'List online readiness, local installation, reference sources, LoRAs, and recent jobs.',
              lambda _: images.catalog(), {}, read_only=True)
-        tool('image_install', 'Download and validate missing local components. Target inference installs Vulkan and the base model. Target training also installs Python and the LoRA trainer.',
-             images.provision, {'target': enum('inference', 'training')}, ('target',), open_world=True)
+        tool('image_install', 'Download and validate missing local components. Inference installs the Windows Vulkan engine and SD 1.x base; training installs the CUDA or Apple MPS environment and selected SD 1.x or Animagine XL 4.0 anime SDXL base. On Apple Silicon, iris3b or anima installs MFlux and Apple MLX with the selected model snapshot for local LoRA training. Anima Base is anime-specific; its model and derivatives are limited to non-commercial use.',
+             images.provision, {'target': enum('inference', 'training'), 'base_model': enum('sd1', 'sdxl', 'iris3b', 'anima')},
+             ('target',), open_world=True)
         tool('dataset_source', 'List reference images and existing captions. Use source reference for the directory configured at startup.',
              self.dataset_source, {'source': TEXT}, ('source',), read_only=True)
         tool('dataset_image', 'Inspect a reference or saved training image for selection and captioning. Returns image content and its download URL.',
@@ -74,18 +75,23 @@ class PrismaMCP:
              images.restore_dataset, {'data': TEXT})
         tool('lora_import', 'Import a compatible SD 1.x safetensors LoRA as base64 (up to 45 MiB).',
              images.import_lora, {'name': TEXT, 'data': TEXT}, ('name', 'data'))
-        tool('lora_train', 'Train an independent LoRA on a saved dataset. Check image_job for checkpoints and compatible LoRA IDs.',
-             images.train, {'dataset': JOB, 'name': TEXT, 'steps': INT, 'save_every': INT, 'rank': INT,
-                            'lr': schema('number'), 'repeats': INT, 'seed': INT}, ('dataset', 'name'))
-        tool('image_generate', 'Queue local inference or an online API call. Online sends the prompt and uses account quota. Locally, use [""] for the base or two LoRA IDs for matched seeds.',
+        tool('lora_train', 'Train an SD 1.x, SDXL, Apple Silicon Iris-3B, or anime-specific Anima Base LoRA on a saved dataset. Set parent_lora to continue a compatible SD 1.x or SDXL LoRA from its existing weights. Iris and Anima use MFlux on Apple MLX at 512 px with gradient checkpointing; Anima writes ComfyUI-compatible LoRA weights. Anima and its derivatives are limited to non-commercial use. Check image_job for checkpoints and provenance.',
+             images.train, {'dataset': JOB, 'name': TEXT, 'base_model': enum('sd1', 'sdxl', 'iris3b', 'anima'),
+                            'steps': INT, 'save_every': INT, 'rank': INT,
+                            'lr': schema('number'), 'repeats': INT, 'seed': INT,
+                            'parent_lora': TEXT}, ('dataset', 'name'))
+        tool('image_generate', 'Queue local inference or an online API call. Online sends the prompt and uses account quota. Locally, use base_model anima, sdxl, or sd1 to choose a base without a LoRA; use [""] for the selected base or two compatible LoRA IDs for matched seeds. Anima runs with Apple MLX and accepts er_sde or euler sampling.',
              images.generate, {'mode': enum('local', 'online'), 'prompt': TEXT, 'count': INT,
                                'model': enum(*ONLINE_MODELS), 'size': enum(*ONLINE_SIZES),
                                'quality': enum('low', 'medium', 'high'), 'negative': TEXT,
-                               'loras': schema('array', items=TEXT, minItems=1, maxItems=2), 'width': INT,
+                               'loras': schema('array', items=TEXT, minItems=1, maxItems=2),
+                               'base_model': enum('sd1', 'sdxl', 'anima'), 'width': INT,
                                'height': INT, 'steps': INT, 'cfg': schema('number'), 'sampler': enum(*SAMPLERS),
                                'weight': schema('number'), 'seed': INT}, ('mode', 'prompt'), open_world=True)
         tool('image_job', 'Read a job state, parameters, input hashes, log tail, and artifact links by job ID.',
              self.job, {'id': JOB}, ('id',), read_only=True)
+        tool('image_recover_training', 'Recover artifacts from a completed Iris-3B training run when MFlux wrote them to its timestamped output folder. The task is marked complete only after the final LoRA archive is found and registered.',
+             self.recover_training, {'id': JOB}, ('id',))
         tool('image_cancel', 'Cancel a queued or running local image job using its ID. A submitted online request may already be billed.',
              lambda args: images.jobs.cancel(args['id']), {'id': JOB}, ('id',), destructive=True)
         tool('image_replay', 'Re-run an install, generation or training job. Recorded local inputs are checked before GPU work. Online replay makes a new paid request.',
@@ -129,6 +135,13 @@ class PrismaMCP:
 
     def job(self, args):
         record = self.images.jobs.get(args['id'], details=True)
+        for category in ('images', 'checkpoints'):
+            for artifact in record[category]:
+                artifact['url'] = self.artifact_url(record['id'], category, artifact['name'])
+        return record
+
+    def recover_training(self, args):
+        record = self.images.recover_iris_training(args['id'])
         for category in ('images', 'checkpoints'):
             for artifact in record[category]:
                 artifact['url'] = self.artifact_url(record['id'], category, artifact['name'])

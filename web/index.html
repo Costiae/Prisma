@@ -12,6 +12,7 @@
   <header class="topbar">
     <a class="brand" href="/">Prisma</a>
     <nav aria-label="制作文档">
+      <a href="#pipeline">制作信息流</a>
       <a href="#image-studio">图像工作室</a>
       <a href="/docs/reproducible-workflow.md" target="_blank" rel="noopener">从零开始与 MCP</a>
       <a href="/docs/media-prompt-guide.md" target="_blank" rel="noopener">素材 Prompt</a>
@@ -24,15 +25,187 @@
     <div class="page-head">
       <div>
         <h1>视觉小说工作台</h1>
-        <p>从原文整理 Scenario，逐场安排演出，再导出 Ren’Py 工程。</p>
+        <p>按制作依赖查看信息从哪里来、交给谁；每个节点标明当前已接通或待接入。</p>
       </div>
       <button id="sample" type="button">载入车站样例</button>
     </div>
 
     <div id="status" class="status" role="status" aria-live="polite">可以从原文或已有的 Scenario 开始。</div>
 
+    <section id="pipeline" class="pipeline panel" aria-labelledby="pipeline-title">
+      <div class="pipeline-heading">
+        <div>
+          <p class="eyebrow">PROJECT DATA FLOW</p>
+          <h2 id="pipeline-title">制作信息流</h2>
+          <p>看每个产物从哪里取得信息、交给哪个下游。绿色为当前已接通，琥珀色为部分接通，灰色为管线规划。</p>
+        </div>
+        <a class="section-link" href="#raw-panel">从原文开始 ↓</a>
+      </div>
+
+      <div class="flow-graph-scroll" tabindex="0" aria-label="制作管线拓扑，可横向滚动查看全部节点">
+        <div class="flow-graph">
+          <svg class="flow-edges" viewBox="0 0 1600 760" preserveAspectRatio="none" aria-hidden="true">
+            <defs>
+              <marker id="flow-arrow-live" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path fill="#4b8058" d="M0 0 L8 4 L0 8 Z" /></marker>
+              <marker id="flow-arrow-partial" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path fill="#bd8b33" d="M0 0 L8 4 L0 8 Z" /></marker>
+              <marker id="flow-arrow-plan" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path fill="#9da59c" d="M0 0 L8 4 L0 8 Z" /></marker>
+              <marker id="flow-arrow-reference" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path fill="#7189a1" d="M0 0 L8 4 L0 8 Z" /></marker>
+            </defs>
+            <path class="pipeline-edge edge-live" data-from="raw" data-to="scenario" d="M200 362 L260 362" />
+            <path class="pipeline-edge edge-live" data-from="scenario" data-to="script" d="M440 330 C465 330 465 16 520 16 L1320 16 C1360 16 1360 338 1380 350" />
+            <path class="pipeline-edge edge-plan" data-from="scenario" data-to="chapter-brief" d="M440 342 C475 342 480 116 520 116" />
+            <path class="pipeline-edge edge-plan" data-from="scenario" data-to="content-overview" d="M440 362 C475 362 480 270 520 270" />
+            <path class="pipeline-edge edge-plan" data-from="scenario" data-to="character-overview" d="M440 382 C475 382 480 435 520 435" />
+            <path class="pipeline-edge edge-plan" data-from="content-overview" data-to="music-assets" d="M700 270 C760 270 760 170 820 170" />
+            <path class="pipeline-edge edge-partial" data-from="content-overview" data-to="background-assets" d="M700 270 C760 270 760 285 820 285" />
+            <path class="pipeline-edge edge-plan" data-from="character-overview" data-to="portrait-baseline" d="M700 435 C760 435 760 400 820 400" />
+            <path class="pipeline-edge edge-plan" data-from="character-overview" data-to="voice-baseline" d="M700 435 C760 435 760 545 820 545" />
+            <path class="pipeline-edge edge-reference" data-from="music-reference" data-to="music-assets" d="M910 115 L910 135" />
+            <path class="pipeline-edge edge-reference" data-from="character-reference" data-to="portrait-baseline" d="M700 625 C765 625 760 420 820 400" />
+            <path class="pipeline-edge edge-reference" data-from="voice-reference" data-to="voice-baseline" d="M910 630 L910 580" />
+            <path class="pipeline-edge edge-plan" data-from="portrait-baseline" data-to="sprite-assets" d="M1000 400 C1035 400 1040 360 1080 360" />
+            <path class="pipeline-edge edge-plan" data-from="portrait-baseline" data-to="cg-assets" d="M1000 415 C1035 415 1040 465 1080 465" />
+            <path class="pipeline-edge edge-plan" data-from="voice-baseline" data-to="voice-assets" d="M1000 545 C1035 545 1040 590 1080 590" />
+            <path class="pipeline-edge edge-partial" data-from="scenario" data-to="voice-assets" d="M350 400 L350 735 L1140 735 L1140 625" />
+            <path class="pipeline-edge edge-plan" data-from="music-assets" data-to="script" d="M1000 170 C1135 170 1260 170 1300 170 L1300 350 L1380 350" />
+            <path class="pipeline-edge edge-partial" data-from="background-assets" data-to="script" d="M1000 285 L1320 285 L1320 360 L1380 360" />
+            <path class="pipeline-edge edge-partial" data-from="sprite-assets" data-to="script" d="M1260 360 L1380 360" />
+            <path class="pipeline-edge edge-partial" data-from="cg-assets" data-to="script" d="M1260 465 C1320 465 1320 372 1380 372" />
+            <path class="pipeline-edge edge-partial" data-from="voice-assets" data-to="script" d="M1260 590 C1335 590 1335 384 1380 384" />
+          </svg>
+
+          <button class="flow-node graph-node graph-node--raw is-live" type="button" data-node="raw" data-title="Raw Text" data-input="作者导入的原文、起始章节和说话人映射。" data-handoff="原文段落、章节标题、说话人线索。" data-output="交给 Scenario 草稿器，生成可校对的剧本结构。" data-target="#raw-panel"><span class="node-title">Raw Text <b class="node-state" data-flow-id="flow-raw-state">等待原文</b></span><span class="node-value" data-flow-id="flow-raw-value">原文正文 · 章节起点 · 说话人映射</span></button>
+          <button class="flow-node graph-node graph-node--scenario is-live" type="button" data-node="scenario" data-title="Scenario" data-input="Raw Text、起始章节和说话人映射；也可以直接导入或编辑 Scenario。" data-handoff="章节、场景 ID、台词顺序、说话人和每句的触发位置。" data-output="分送梗概、内容与角色概览；台词与演出绑定进入 Script。" data-target="#scenario-panel"><span class="node-title">Scenario <b class="node-state" data-flow-id="flow-scenario-state">等待生成</b></span><span class="node-value" data-flow-id="flow-scenario-value">章节 → 场景 ID → 有序台词</span></button>
+          <button class="flow-node graph-node graph-node--script is-live" type="button" data-node="script" data-title="Scripts / Ren’Py" data-input="Scenario、按场景/台词位置编排的演出 cues，以及被引用的媒体文件。" data-handoff="背景、立绘、CG、音乐、音效、配音和触发位置。" data-output="生成 Ren’Py 脚本并打包实际引用文件。" data-target="#cue-panel"><span class="node-title">Scripts / Ren’Py <b class="node-state" data-flow-id="flow-script-state">等待解析</b></span><span class="node-value" data-flow-id="flow-script-value">Scenario + cues + 素材引用</span></button>
+
+          <button class="flow-node graph-node graph-node--chapter-brief is-plan" type="button" data-node="chapter-brief" data-title="章节梗概" data-input="Scenario 中该章节的场景与台词。" data-handoff="章节事件、人物变化、前后承接关系。" data-output="作者审阅；确认后作为分支上下文。"><span class="node-title">章节梗概 <b class="node-state">规划中</b></span><span class="node-value">按章提取 · 作者审阅</span></button>
+          <button class="flow-node graph-node graph-node--content-overview is-plan" type="button" data-node="content-overview" data-title="内容总览" data-input="全篇 Scenario。" data-handoff="时空范围、地点、世界观、氛围与音乐基调。" data-output="向背景与音乐资产提供上下文。"><span class="node-title">内容总览 <b class="node-state">规划中</b></span><span class="node-value">全文场景与情节脉络</span></button>
+          <button class="flow-node graph-node graph-node--character-overview is-plan" type="button" data-node="character-overview" data-title="角色概览" data-input="Scenario 中人物的行动、对白、称谓与关系。" data-handoff="统一角色 ID、性格、关系、外观和声音线索。" data-output="与角色参考及人声参考合并，形成视觉/声音基准。"><span class="node-title">角色概览 <b class="node-state">规划中</b></span><span class="node-value">角色 ID · 性格 · 关系 · 描写</span></button>
+
+          <button class="flow-node graph-node graph-node--music-reference is-reference" type="button" data-node="music-reference" data-title="音乐参考" data-input="作者提供的音乐样例或方向说明。" data-handoff="曲风、配器、情绪和节奏偏好。" data-output="与内容总览、场景用途一起生成音乐资产。"><span class="node-title">音乐参考 <b class="node-state">外部参考</b></span><span class="node-value">风格 / 配器 / 情绪</span></button>
+          <button class="flow-node graph-node graph-node--music-assets is-plan" type="button" data-node="music-assets" data-title="音乐资产" data-input="内容总览、音乐参考、场景情绪与用途。" data-handoff="曲风标签、生成提示、候选版本、循环点。" data-output="审阅通过后按场景和触发位置进入 Script。"><span class="node-title">音乐资产 <b class="node-state">规划中</b></span><span class="node-value">内容总览 + 音乐参考</span></button>
+          <button class="flow-node graph-node graph-node--background-assets is-partial" type="button" data-node="background-assets" data-title="背景资产" data-input="内容总览、场景地点/时间与构图要求。" data-handoff="固定机位、环境、光线、画面规格、候选版本。" data-output="候选需手动入库并在演出 JSON 绑定。" data-target="#image-studio"><span class="node-title">背景资产 <b class="node-state" data-flow-id="flow-background-state">候选可生成</b></span><span class="node-value">场景可带入构图建议</span></button>
+
+          <button class="flow-node graph-node graph-node--portrait-baseline is-plan" type="button" data-node="portrait-baseline" data-title="角色基准立绘" data-input="角色概览与角色参考。" data-handoff="稳定的身份、服装、画风和画布锚点。" data-output="作为立绘差分和 CG 的统一外观来源。"><span class="node-title">角色基准立绘 <b class="node-state">规划中</b></span><span class="node-value">角色概览 + 角色参考</span></button>
+          <button class="flow-node graph-node graph-node--voice-baseline is-plan" type="button" data-node="voice-baseline" data-title="角色声音基准" data-input="角色概览与人声参考。" data-handoff="角色专属音色、发音、语速、音域与表演倾向。" data-output="与 Scenario 已确认台词合并，形成角色语音。"><span class="node-title">角色声音基准 <b class="node-state">规划中</b></span><span class="node-value">角色概览 + 人声参考</span></button>
+
+          <button class="flow-node graph-node graph-node--character-reference is-reference" type="button" data-node="character-reference" data-title="角色参考" data-input="作者提供的角色图像或文字参考。" data-handoff="身份、发型、服装和画风锚点。" data-output="与角色概览合并，确定角色基准立绘。"><span class="node-title">角色参考 <b class="node-state">外部参考</b></span><span class="node-value">形象 / 服装 / 画风</span></button>
+          <button class="flow-node graph-node graph-node--voice-reference is-reference" type="button" data-node="voice-reference" data-title="人声参考" data-input="作者提供的人声样例或描述。" data-handoff="音色、口音、语速与表演偏好。" data-output="与角色概览合并，确定角色声音基准。"><span class="node-title">人声参考 <b class="node-state">外部参考</b></span><span class="node-value">音色 / 发音 / 表演</span></button>
+
+          <button class="flow-node graph-node graph-node--sprite-assets is-partial" type="button" data-node="sprite-assets" data-title="立绘资产" data-input="目标上游是审阅通过的角色基准立绘。" data-handoff="角色身份、服装、表情差分和动作。" data-output="当前可生成独立候选；基准身份尚未自动继承。" data-target="#image-studio"><span class="node-title">立绘资产 <b class="node-state" data-flow-id="flow-sprite-state">可生成候选</b></span><span class="node-value">差分 / 表情</span></button>
+          <button class="flow-node graph-node graph-node--cg-assets is-partial" type="button" data-node="cg-assets" data-title="CG 资产" data-input="目标上游是角色基准立绘与场景动作。" data-handoff="身份、服装、姿势、表情、场景构图。" data-output="当前可生成独立候选；基准身份尚未自动继承。" data-target="#image-studio"><span class="node-title">CG 资产 <b class="node-state" data-flow-id="flow-cg-state">可生成候选</b></span><span class="node-value">角色基准 + 场景动作</span></button>
+          <button class="flow-node graph-node graph-node--voice-assets is-partial" type="button" data-node="voice-assets" data-title="人声资产" data-input="Scenario 台词/确认说话人、角色声音基准。" data-handoff="台词 ID、音频片段、语气与版本。" data-output="当前可手动上传并绑定；审批链待接入。" data-target="#cue-panel"><span class="node-title">人声资产 <b class="node-state" data-flow-id="flow-voice-state">可手动挂接</b></span><span class="node-value">台词 + 声音基准</span></button>
+        </div>
+      </div>
+      <p class="flow-graph-hint"><span>箭头表示信息依赖</span><span>选择节点查看交接字段</span><span>可横向滚动</span></p>
+
+      <div class="flow-legend" aria-label="管线状态说明"><span class="legend-live">已接通</span><span class="legend-partial">部分接通</span><span class="legend-plan">规划中</span><span class="legend-reference">参考输入</span></div>
+
+      <aside class="flow-inspector" aria-live="polite">
+        <div class="inspector-title"><span>信息交接</span><strong id="flow-detail-title">Scenario</strong><b id="flow-detail-state" class="node-state">等待生成</b></div>
+        <dl><dt>来源</dt><dd id="flow-detail-input">Raw Text、起始章节和说话人映射。</dd>
+          <dt>传递内容</dt><dd id="flow-detail-handoff">章节、场景 ID、台词顺序、说话人和每句的触发位置。</dd>
+          <dt>下游用途</dt><dd id="flow-detail-output">供章节/内容/角色摘要、台词配音和 Script 演出绑定使用。</dd></dl>
+        <p id="flow-detail-current" class="inspector-current"></p>
+        <a id="flow-detail-link" class="section-link" href="#scenario-panel">打开对应编辑器 ↓</a>
+      </aside>
+
+      <details class="flow-ledger">
+        <summary>交接字段与分支状态（展开查看）</summary>
+      <div class="flow-table-wrap" tabindex="0" aria-label="制作分支的来源、交接信息和下游去向">
+        <table class="pipeline-table">
+          <thead><tr><th scope="col">支线 / 产物</th><th scope="col">上游信息</th><th scope="col">管线交接字段</th><th scope="col">产物去向</th></tr></thead>
+          <tbody>
+            <tr>
+              <th scope="row"><div class="table-path">
+                <button class="flow-node flow-table-node is-live" type="button" data-node="raw" data-title="Raw Text" data-input="作者导入的原文、起始章节和说话人映射。" data-handoff="原文段落、章节标题、说话人线索。" data-output="交给 Scenario 草稿器，生成可校对的剧本结构。" data-target="#raw-panel"><span class="node-title">Raw Text <b id="flow-raw-state" class="node-state">等待原文</b></span><span id="flow-raw-value" class="node-value">原文 + 章节起点 + 说话人映射</span></button>
+                <span class="table-arrow">↓</span>
+                <button class="flow-node flow-table-node is-live" type="button" data-node="scenario" data-title="Scenario" data-input="Raw Text、起始章节和说话人映射；也可以直接导入或编辑 Scenario。" data-handoff="章节、场景 ID、台词顺序、说话人和每句的触发位置。" data-output="供摘要分支、台词配音和 Script 演出绑定使用。" data-target="#scenario-panel"><span class="node-title">Scenario <b id="flow-scenario-state" class="node-state">等待生成</b></span><span id="flow-scenario-value" class="node-value">章节 → 场景 ID → 有序台词与说话人</span></button>
+              </div></th>
+              <td>原文正文、章节标题、说话人映射；也可直接导入 Scenario。</td>
+              <td>章节结构、场景 ID、台词顺序、说话人与正文行。</td>
+              <td>章节/内容/角色摘要；按场景和台词定位演出，进入 Script。</td>
+            </tr>
+            <tr>
+              <th scope="row"><button class="flow-node flow-table-node is-plan" type="button" data-node="chapter-brief" data-title="章节梗概" data-input="Scenario 中属于该章节的场景和台词。" data-handoff="按章审阅的事件、人物变化与承接关系。" data-output="供作者确认章节理解，再作为其他分支可选上下文。"><span class="node-title">章节梗概 <b class="node-state">规划中</b></span><span class="node-value">按章节提取 · 作者审阅</span></button></th>
+              <td>Scenario 中该章节的场景与台词。</td>
+              <td>章节事件、人物变化、前后承接关系。</td>
+              <td>作者审阅；修订后作为分支上下文。</td>
+            </tr>
+            <tr>
+              <th scope="row"><button class="flow-node flow-table-node is-plan" type="button" data-node="content-overview" data-title="内容总览" data-input="全篇 Scenario。" data-handoff="时空范围、地点、氛围、世界观与作品基调。" data-output="为背景和音乐生成提供上下文；音乐分支还接收音乐参考。"><span class="node-title">内容总览 <b class="node-state">规划中</b></span><span class="node-value">全文场景与情节脉络</span></button></th>
+              <td>全篇 Scenario。</td>
+              <td>时空范围、地点关系、世界观、整体氛围与音乐基调。</td>
+              <td>交给背景与音乐分支；音乐另接音乐参考。</td>
+            </tr>
+            <tr>
+              <th scope="row"><button class="flow-node flow-table-node is-plan" type="button" data-node="music-assets" data-title="音乐资产" data-input="内容总览、音乐参考和场景的情绪/用途标签。" data-handoff="可检索的音乐需求、生成提示、候选和循环版本。" data-output="审批通过后按场景和触发位置挂到 Script。"><span class="node-title">音乐资产 <b class="node-state">规划中</b></span><span class="node-value">内容总览 + 音乐参考</span></button></th>
+              <td>内容总览、音乐参考、场景情绪与用途。</td>
+              <td>情绪/曲风标签、配器提示、候选版本、循环点。</td>
+              <td>审阅通过后按场景与触发位置交给 Script。</td>
+            </tr>
+            <tr>
+              <th scope="row"><button class="flow-node flow-table-node is-partial" type="button" data-node="background-assets" data-title="背景资产" data-input="内容总览、场景地点/时间与作者补充的构图要求。" data-handoff="固定机位、地点氛围、画面规格和候选图。" data-output="候选审阅后，按场景挂到 Script。" data-target="#image-studio"><span class="node-title">背景资产 <b id="flow-background-state" class="node-state">候选可生成</b></span><span class="node-value">场景可带入构图建议；仍需手动入库</span></button></th>
+              <td>内容总览、场景地点/时间、作者构图要求。</td>
+              <td>机位、环境、光线、画面规格、候选版本。</td>
+              <td>候选可生成；手动加入素材并通过演出 JSON 绑定。</td>
+            </tr>
+            <tr>
+              <th scope="row"><button class="flow-node flow-table-node is-plan" type="button" data-node="character-overview" data-title="角色概览" data-input="Scenario 中角色相关的行动、对白和称谓。" data-handoff="角色身份、性格、关系、外观线索和声音线索。" data-output="分别与角色参考、人声参考合并，形成视觉和声音基准。"><span class="node-title">角色概览 <b class="node-state">规划中</b></span><span class="node-value">角色 ID / 性格 / 关系 / 描写</span></button></th>
+              <td>Scenario 中人物行动、对白、称谓与关系。</td>
+              <td>统一角色 ID、性格、关系、外观线索、声音线索。</td>
+              <td>分送角色基准立绘与角色声音基准。</td>
+            </tr>
+            <tr>
+              <th scope="row"><div class="table-path">
+                <button class="flow-node flow-table-node is-plan" type="button" data-node="portrait-baseline" data-title="角色基准立绘" data-input="角色概览与角色参考。" data-handoff="稳定的脸、发型、身形、服装、画风和画布锚点。" data-output="作为角色差分与 CG 的统一身份依据。"><span class="node-title">角色基准立绘 <b class="node-state">规划中</b></span><span class="node-value">角色概览 + 角色参考</span></button>
+                <span class="table-arrow">↓</span>
+                <button class="flow-node flow-table-node is-partial" type="button" data-node="sprite-assets" data-title="立绘资产" data-input="目标上游是审阅通过的角色基准立绘。" data-handoff="角色身份、服装、表情差分和动作。" data-output="当前可生成独立候选；基准身份尚未自动继承。" data-target="#image-studio"><span class="node-title">立绘差分 <b class="node-state" data-flow-id="flow-sprite-state">可生成候选</b></span><span class="node-value">目标沿用基准 · 当前单次生成</span></button>
+                <span class="table-arrow">↓</span>
+                <button class="flow-node flow-table-node is-partial" type="button" data-node="cg-assets" data-title="CG 资产" data-input="目标上游是角色基准立绘与场景动作。" data-handoff="角色身份、服装、姿势、表情与场景构图。" data-output="当前可生成独立候选；基准身份尚未自动继承。" data-target="#image-studio"><span class="node-title">CG 资产 <b class="node-state" data-flow-id="flow-cg-state">可生成候选</b></span><span class="node-value">当前单次生成；未自动继承基准</span></button>
+              </div></th>
+              <td>角色概览 + 角色参考；差分和 CG 再接基准立绘与场景动作。</td>
+              <td>身份锚点、服装、画风、姿势/表情、画布规格。</td>
+              <td>基准立绘作为差分/CG 的外观来源；当前可生成独立候选，尚未自动继承。</td>
+            </tr>
+            <tr>
+              <th scope="row"><button class="flow-node flow-table-node is-plan" type="button" data-node="voice-baseline" data-title="角色声音基准" data-input="角色概览与人声参考。" data-handoff="角色专属的音色、发音、语速和表演基线。" data-output="与 Scenario 的已确认台词合并，生成角色语音。"><span class="node-title">角色声音基准 <b class="node-state">规划中</b></span><span class="node-value">角色概览 + 人声参考</span></button></th>
+              <td>角色概览、人声参考。</td>
+              <td>音色、发音、语速、音域和表演倾向。</td>
+              <td>作为角色专属基准，供台词语音分支复用。</td>
+            </tr>
+            <tr>
+              <th scope="row"><button class="flow-node flow-table-node is-partial" type="button" data-node="voice-assets" data-title="角色语音" data-input="Scenario 台词、确认的说话人和角色声音基准。" data-handoff="台词 ID、音频片段、演出语气与版本。" data-output="审批通过后按台词 ID 进入 Script。" data-target="#cue-panel"><span class="node-title">角色语音 <b id="flow-voice-state" class="node-state">可手动挂接</b></span><span class="node-value">台词 + 声音基准 → 人声片段</span></button></th>
+              <td>Scenario 台词/确认说话人 + 角色声音基准。</td>
+              <td>台词 ID、语气、音频片段和版本记录。</td>
+              <td>当前可手动上传并绑定；生成与审批链待接入。</td>
+            </tr>
+            <tr>
+              <th scope="row"><button class="flow-node flow-table-node is-live" type="button" data-node="script" data-title="Scripts" data-input="Scenario、按场景/台词位置编排的 cues，以及被引用的媒体文件。" data-handoff="背景、立绘、音乐、音效、配音和触发位置。" data-output="生成 Ren’Py 脚本并把引用素材打包；未审核的候选不会自动进入。" data-target="#cue-panel"><span class="node-title">Scripts / Ren’Py <b id="flow-script-state" class="node-state">等待解析</b></span><span id="flow-script-value" class="node-value">Scenario + cue JSON + 实际引用文件</span></button></th>
+              <td>Scenario、演出 cues、审阅通过的资产文件。</td>
+              <td>场景/台词触发点、动作类型、角色 ID、文件引用。</td>
+              <td>生成 Ren’Py 脚本并复制被引用文件；<strong id="flow-export-state">尚未导出</strong>。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      </details>
+
+      <div class="active-route" aria-label="当前 WebUI 已接通的数据路径">
+        <div class="active-route-heading"><span class="live-dot"></span><strong>当前 WebUI 已接通</strong><span>页面会话内传递</span></div>
+        <div class="active-route-steps">
+          <button type="button" class="route-step" data-target="#raw-panel"><b>Raw Text</b><small>正文 / 章节 / 说话人映射</small></button><span class="route-arrow">→</span>
+          <button type="button" class="route-step" data-target="#scenario-panel"><b>Scenario</b><small>章节 / 场景 ID / 有序台词</small></button><span class="route-arrow">→</span>
+          <button type="button" class="route-step" data-target="#scene-panel"><b>场景与台词</b><small>行号 / 说话人 / 当前触发点</small></button><span class="route-arrow">→</span>
+          <button type="button" class="route-step" data-target="#image-studio"><b>Prompt / 候选</b><small>场景上下文 → 生成 → 加入素材</small></button><span class="route-arrow">→</span>
+          <button type="button" class="route-step" data-target="#cue-panel"><b>Scripts / Ren’Py ZIP</b><small>Scenario + cues + 被引用文件</small></button>
+        </div>
+      </div>
+
+    </section>
+
     <div class="editors">
-      <section class="panel" aria-labelledby="raw-title">
+      <section id="raw-panel" class="panel" aria-labelledby="raw-title">
         <div class="panel-head">
           <h2 id="raw-title"><label for="raw">原文</label></h2>
           <label class="file-button">导入 TXT<input id="raw-file" type="file" accept=".txt,.md,text/plain" aria-label="导入原文"></label>
@@ -50,7 +223,7 @@
         </details>
       </section>
 
-      <section class="panel" aria-labelledby="scenario-title">
+      <section id="scenario-panel" class="panel" aria-labelledby="scenario-title">
         <div class="panel-head">
           <h2 id="scenario-title"><label for="scenario">Scenario</label></h2>
           <label class="file-button">导入 MD<input id="scenario-file" type="file" accept=".md,.txt,text/plain" aria-label="导入 Scenario"></label>
@@ -65,7 +238,7 @@
     </div>
 
     <div class="editors staging">
-      <section class="panel" aria-labelledby="scene-title">
+      <section id="scene-panel" class="panel" aria-labelledby="scene-title">
         <div class="panel-head">
           <h2 id="scene-title">场景与台词</h2>
           <select id="scene" aria-label="选择场景" disabled><option>暂无场景</option></select>
@@ -74,7 +247,7 @@
         <p class="hint">点击一条文本，为它添加演出动作。</p>
       </section>
 
-      <section class="panel" aria-labelledby="cue-title">
+      <section id="cue-panel" class="panel" aria-labelledby="cue-title">
         <div class="panel-head">
           <h2 id="cue-title">演出与素材</h2>
           <a class="section-link" href="#image-studio">生成图片</a>
@@ -130,13 +303,14 @@
           <textarea id="image-prompt" class="image-prompt" maxlength="4000" required placeholder="例如：一名短发女军官在明亮的石庭中回头，蓝白礼服，鲜艳的赛璐璐平涂。"></textarea>
           <fieldset id="image-local" class="studio-grid">
             <legend class="sr-only">本地推理参数</legend>
-            <label class="studio-wide">负面提示词<textarea id="image-negative" class="negative-prompt" maxlength="4000">cat ears, animal ears, tail, halo, wings, extra limbs, cropped head, text, watermark</textarea></label>
+            <label class="studio-wide">负面提示词<textarea id="image-negative" class="negative-prompt" maxlength="4000">worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, chromatic aberration, bad anatomy, extra limbs, text, watermark</textarea></label>
             <label>LoRA<select id="image-lora"><option value="">底模</option></select></label>
+            <label>本地底模<select id="image-base-model"><option value="anima">Anima Base · MLX</option></select></label>
             <label>同 seed 对照<select id="image-compare"><option value="none">关闭</option></select></label>
             <label>LoRA 权重<input id="image-weight" type="number" min="0.05" max="1.5" step="0.01" value="0.35"></label>
-            <label>分辨率<select id="image-local-size"><option value="512x896">512 × 896 · 立绘</option><option value="896x512">896 × 512 · 横图</option><option value="512x512">512 × 512 · 方图</option><option value="768x768">768 × 768 · 方图</option></select></label>
+            <label>分辨率<select id="image-local-size"><option value="512x896">512 × 896 · 立绘</option><option value="832x1216">832 × 1216 · Anima 立绘</option><option value="896x512">896 × 512 · 横图</option><option value="512x512">512 × 512 · 方图</option><option value="768x768">768 × 768 · 方图</option><option value="1024x1024">1024 × 1024 · 高质量方图</option></select></label>
             <label>Seed<input id="image-seed" type="number" min="0" max="2147483644" step="1" placeholder="随机"></label>
-            <label>采样器<select id="image-sampler"><option value="euler_a">Euler a</option><option value="euler">Euler</option><option value="dpm++2m">DPM++ 2M</option></select></label>
+            <label>采样器<select id="image-sampler"><option value="euler_a">Euler a</option><option value="euler">Euler</option><option value="dpm++2m">DPM++ 2M</option><option value="er_sde">Anima ER SDE</option></select></label>
             <label>采样步数<input id="image-steps" type="number" min="1" max="60" value="20" required></label>
             <label>CFG<input id="image-cfg" type="number" min="1" max="15" step="0.1" value="6.5" required></label>
             <button id="image-r2r3" class="studio-wide" type="button" hidden>套用 R2 / R3 对照配置</button>
@@ -170,19 +344,26 @@
           <section class="image-card" aria-labelledby="toolchain-title">
             <h3 id="toolchain-title">安装与权重</h3>
             <dl id="image-environment" class="image-env"></dl>
+            <label class="studio-field">要安装的训练底模<select id="image-install-base">
+              <option value="sd1">Anything V3 · SD 1.x（2.13 GB）</option>
+              <option value="sdxl">Animagine XL 4.0 Opt · SDXL 动漫（6.94 GB）</option>
+              <option value="anima">Anima Base · MLX · 动漫专用（约 5.7 GB）</option>
+            </select></label>
             <div class="studio-actions">
               <button id="image-install" type="button" disabled>拉取推理工具与底模</button>
-              <button id="image-install-train" type="button" disabled>拉取完整 LoRA 工具链</button>
+              <button id="image-install-train" type="button" disabled>拉取所选 LoRA 工具链</button>
             </div>
-            <p class="hint">优先复用已有安装。首次安装会下载约 2.13 GB 的底模；训练环境另需下载 CUDA 版 PyTorch。</p>
-            <label class="studio-field">导入现成 LoRA（.safetensors）<input id="image-import-lora" type="file" accept=".safetensors"></label>
-            <p class="hint">浏览器单次可导入 45 MiB；更大的权重可放进工具箱的 loras 目录，再刷新环境。</p>
+            <p class="hint">训练底模可选 SD 1.x、SDXL、Iris-3B 或 Apple Silicon / MLX 上的 Anima Base 动漫模型。Anima LoRA 与 ComfyUI 兼容，模型和衍生权重仅限非商业用途；任务会记录模型修订、文件哈希、训练参数和产物。</p>
+            <label class="studio-field">导入现成 SD 1.x LoRA（.safetensors）<input id="image-import-lora" type="file" accept=".safetensors"></label>
+            <p class="hint">Apple Silicon 可在本机预览 Animagine XL SDXL LoRA；SD 1.x LoRA 的本地试画使用 Windows 工具链。浏览器单次可导入 45 MiB；更大的 SD 1.x 权重可放进工具箱的 loras 目录，再刷新环境。</p>
           </section>
           <form id="image-train-form" class="image-card">
             <h3>训练新 LoRA</h3>
-            <p class="hint">基于 Anything V3 独立训练。用不同名称保存分支，训练完成后可直接试画。</p>
+            <p id="image-train-hint" class="hint">基于所选底模独立训练。SD 1.x 使用 512 分辨率；SDXL 使用 1024 分辨率；Anima 使用 Apple MLX 在 512 分辨率训练，可直接在本机预览。</p>
             <div class="studio-grid">
               <label class="studio-wide">已保存数据集<select id="image-train-dataset" required><option value="">先保存数据集</option></select></label>
+              <label class="studio-wide">训练底模<select id="image-train-base" required><option value="">先安装训练底模</option></select></label>
+              <label class="studio-wide">续训已有 LoRA（可选）<select id="image-train-parent"><option value="">从头训练</option></select></label>
               <label class="studio-wide">输出名称<input id="image-train-name" maxlength="48" required pattern="[A-Za-z0-9][A-Za-z0-9_\-]{0,47}" placeholder="prisma_style_next"></label>
               <label>训练步数<input id="image-train-steps" type="number" min="1" max="5000" value="200" required></label>
               <label>每隔多少步保存<input id="image-train-save" type="number" min="1" max="5000" value="100" required></label>

@@ -230,7 +230,7 @@ def main() -> None:
     images = ImageToolkit(ROOT, workspace=args.image_workspace, reference=args.reference_dir,
                           use_existing=not args.no_existing_media)
     try:
-        with own_workspace(images.home), ThreadingHTTPServer(('127.0.0.1', args.port), Handler) as server:
+        with own_workspace(images.home), ThreadingHTTPServer(('localhost', args.port), Handler) as server:
             server.images = images
             base = f'http://127.0.0.1:{server.server_port}'
             server.mcp = PrismaMCP(images, base)

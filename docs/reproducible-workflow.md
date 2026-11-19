@@ -48,13 +48,13 @@ MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 
 
 ## 路径二 · 安装本地模型并训练 LoRA
 
-本地安装和推理支持 Windows x64 与 Vulkan。训练另需兼容 CUDA 12.4 的 NVIDIA 显卡及驱动。Anything V3 底模约 2.13 GB，首次拉取完整工具链还需为 CUDA PyTorch 解包和缓存留出空间。
+本地推理支持 Windows x64 与 Vulkan；Apple Silicon 支持 MPS 与原生 MLX。本机动漫风格训练优先使用 **Anima Base + MFlux / Apple MLX**：Anima 是动漫与插画专用的 2B 模型，Base 变体适合 LoRA 训练；MFlux 训练全部 28 个 transformer block 的注意力、MLP 和 AdaLN 模块，训练 LoRA 输出 ComfyUI 兼容权重。该路径使用 512 分辨率、Rank 16、batch size 1、梯度检查点和 2 GB MLX 缓存。MFlux 固定为官方提交 `02b92461ec246ec44f5149b5dc3f69817a263a67`；Anima Base 固定为仓库提交 `457fbf842cb86e96af72c65bdd13e3f1c448de84`，模型/VAE/文字编码器约 5.7 GB。Qwen3 和 T5 tokenizer 在安装时解析并固定各自修订，所有文件哈希写入安装与训练任务记录。Anima 模型与其衍生权重仅限非商业用途；生成图片的使用权依模型卡条款处理。Iris-3B 也使用该 MLX 环境；其 Base 权重和 Qwen3-VL 文本编码器约 20 GB。SD 1.x 与 SDXL 训练仍支持 Windows x64/CUDA 12.4 和 Apple Silicon/MPS：SD 1.x 使用 512 分辨率，SDXL 使用 1024 分辨率并训练 U-Net LoRA。Animagine XL 4.0 Opt 固定到 `cagliostrolab/animagine-xl-4.0` revision `2b7c1b397761bf5bd3cc42e5b39ec99314a75a96`，SHA-256 为 `6327eca98bfb6538dd7a4edce22484a1bbc57a8cff6b11d075d40da1afb847ac`。SD 1.x/SDXL 使用隔离的 Python 3.10.20 和固定版 sd-scripts；MFlux 使用独立 Python 3.13。
 
-1. **安装组件。** 在工具箱点「拉取完整 LoRA 工具链」，或调用 `image_install` 并传 `{"target":"training"}`。安装自动准备 Vulkan 推理、Anything V3、Python 3.10.20、CUDA PyTorch、sd-scripts 和 CLIP 分词文件。只想先试底模时选 `{"target":"inference"}`。使用 `image_job` 查看下载阶段、失败原因与日志，失败后可再次提交同一目标。
+1. **安装组件。** 在工具箱选择训练底模后点「拉取所选 LoRA 工具链」，或调用 `image_install` 并传 `{"target":"training","base_model":"anima"}`；`base_model` 可选 `sd1`、`sdxl`、`iris3b` 或 Apple Silicon 专用的 `anima`。`anima` 安装 MFlux、隔离的 Python 3.13、Anima Base、VAE、文字编码器和 tokenizer；模型权重约 5.7 GB。`iris3b` 复用 MFlux 环境并下载 Iris Base 与 Qwen3-VL 文本编码器。SDXL 使用 Animagine XL checkpoint 和分词文件；SD 1.x 使用 Anything V3。选择 `{"target":"inference"}`（Windows）安装 Vulkan 推理工具和 Anything V3。`image_job` 记录仓库、准确提交、文件哈希、依赖版本、下载阶段和日志。失败后可再次提交同一目标。
 2. **准备自己的图。** 将 PNG、JPEG 或 WebP 和同名 UTF-8 `.txt` 标注放入 `Reference/Img`，或启动时传入 `--reference-dir "D:/my-art"`。WebUI 也支持同时上传图片和标注。图库为空时，可以先跑底模生成候选图并下载，编写好标注后，再作为自备训练数据导入。画风 LoRA 可设置一个共用触发词，在每张图的标注里分别记录发色、服装、构图等内容。
 3. **保存快照。** 先调用 `dataset_source` 并传 `{"source":"reference"}`，用 `dataset_image` 看图，再用 `dataset_save` 传入选择的文件名和修改后的标注。若调用方手上只有文件内容，可以在各条目上加 `data`，传对应图片的 Base64。`dataset_export` 返回清单、下载地址和本地目录。WebUI 的「下载数据集 ZIP」也会导出图片、标注和校验值。
-4. **训练。** 用返回的数据集 ID 调用 `lora_train`。默认设置是 200 步、每 100 步保存一次、Rank 4、学习率 `0.0001`、每张图重复 10 次。`image_job` 完成后会给出 checkpoint 文件名、校验值和可直接用于推理的 LoRA ID。训练起点是指定的 Anything V3 底模，已有 LoRA 可以经 `lora_import` 单独用于推理。
-5. **出图和对照。** 调用 `image_generate`，设 `mode` 为 `local`。`loras` 传 `['']` 使用底模，传一个 ID 应用该权重，传两个选项按相同 Seed 对照。提示词写入自己设置的触发词。任务完成后，用 `image_artifact` 下载或预览图片。WebUI 中点「加入素材」即可挂到当前工程。
+4. **训练。** 用返回的数据集 ID 调用 `lora_train`，并把 `base_model` 设为 `sd1`、`sdxl`、`iris3b` 或 `anima`。Anima 默认 Rank 16、学习率 1e-4、25 个完整数据轮次，使用 MFlux / Apple MLX；该模型不支持从已有 LoRA 续训。Iris 同样默认 Rank 16。两种 MLX 路线的 `steps` 表示期望更新步数，系统按数据集张数取整为完整轮次，并在 `options.epochs` 记录实际轮数。SD 1.x 默认 Rank 4；SDXL 默认 Rank 8，可用 `parent_lora` 从同系列权重继续训练。`image_job` 会保留有效参数、数据集与模型哈希、配置文件、工具版本、预览图和 checkpoint；用 `image_artifact` 下载预览或权重。
+5. **出图和对照。** 调用 `image_generate`，设 `mode` 为 `local`。用 `base_model: "anima"` 选 Anima Base，`loras` 传 `['']` 使用底模、传一个 ID 应用 LoRA，或传两个兼容选项按相同 Seed 对照。Anima 默认 1024 方图、30 步、CFG 4.5 和 `er_sde` 采样器；使用风格 LoRA 时提示词加入 `prismaStyle` 触发词。MFlux 在这台 Mac 上直接用 Apple MLX 生成，并写入与 ComfyUI 兼容的 LoRA 权重。任务完成后，用 `image_artifact` 下载或预览图片。WebUI 中点「加入素材」即可挂到当前工程。
 
 下面分别是 `dataset_save` 和 `lora_train` 的参数。训练时将 `dataset` 替换为上一步返回的 ID。
 
@@ -73,12 +73,12 @@ MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 
 ```json
 {
   "dataset": "0123456789abcdef",
-  "name": "my_style_r1",
-  "steps": 200,
-  "save_every": 100,
-  "rank": 4,
+  "name": "my_anima_style_r1",
+  "base_model": "anima",
+  "steps": 1925,
+  "save_every": 500,
+  "rank": 16,
   "lr": 0.0001,
-  "repeats": 10,
   "seed": 1065270805
 }
 ```
@@ -89,12 +89,14 @@ MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 
 {
   "mode": "local",
   "prompt": "myCelStyle, two women in a garden, crisp flat cel shadows",
-  "negative": "animal ears, halo, text, watermark",
+  "base_model": "anima",
+  "negative": "worst quality, low quality, score_1, score_2, score_3, blurry, text, watermark",
   "loras": ["", "<checkpoint-id>"],
   "width": 512,
   "height": 896,
-  "steps": 20,
-  "cfg": 6.5,
+  "steps": 30,
+  "cfg": 4.5,
+  "sampler": "er_sde",
   "seed": 271828,
   "count": 2
 }
@@ -119,6 +121,6 @@ MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 
 
 ## 保存与复跑
 
-默认工作目录是 `build/prisma-images`。数据集清单保留标注、顺序和图片 SHA-256，任务记录保留有效参数、输入文件校验值、训练环境、checkpoint 和图像。WebUI 的「恢复数据集 ZIP」会恢复同一个数据集 ID。超过 45 MiB 的 ZIP 可以解压后用 `--reference-dir` 指向含 `dataset.json` 的目录，再调用 `dataset_restore` 并省略 `data`。迁移完整历史时，同时复制所需任务目录和导入的 LoRA。`image_replay` 或 WebUI 的「复跑本地任务」会复用旧参数，在 GPU 工作前核对新记录的输入。旧任务可能没有完整的校验记录。更换显卡、驱动或推理后端仍可能影响结果。
+默认工作目录是 `build/prisma-images`。数据集清单保留标注、顺序和图片 SHA-256，任务记录保留所选底模及哈希、训练分辨率、有效参数、输入数据、工具版本、分词文件哈希、checkpoint 和图像。WebUI 的「恢复数据集 ZIP」会恢复同一个数据集 ID。超过 45 MiB 的 ZIP 可以解压后用 `--reference-dir` 指向含 `dataset.json` 的目录，再调用 `dataset_restore` 并省略 `data`。迁移完整历史时，同时复制所需任务目录和导入的 LoRA。`image_replay` 或 WebUI 的「复跑本地任务」会复用旧参数，在 GPU 工作前核对新记录的输入。旧任务可能没有完整的校验记录。更换显卡、驱动或推理后端仍可能影响结果。
 
-纯净环境可以用 `python webui.py --no-existing-media --image-workspace build/fresh-prisma` 启动。若已准备官方发布文件，可放入该工作目录的 `downloads`，安装器会校验后使用。没有缓存时会从发布源下载。训练 Python 包版本记录在仓库的 `requirements-lora-win-cu124.txt`，CUDA 两个 wheel 由官方 cu124 索引单独安装。模型、推理工具和训练源码的版本与校验值在 `image_toolkit.py` 中。
+纯净环境可以用 `python webui.py --no-existing-media --image-workspace build/fresh-prisma` 启动。若已准备官方发布文件，可放入该工作目录的 `downloads`，安装器会校验后使用。没有缓存时会从发布源下载。训练 Python 包版本分别记录在 `requirements-lora-win-cu124.txt` 和 `requirements-lora-macos-mps.txt`；Apple MPS 使用 PyTorch 2.8.0 与 torchvision 0.23.0，以支持 FP16 GradScaler，Windows CUDA 版本独立固定。模型、推理工具和训练源码的版本与校验值在 `image_toolkit.py` 中。

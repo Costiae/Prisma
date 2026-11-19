@@ -8,6 +8,8 @@ const asset = field('asset');
 const font = field('font');
 const cues = field('cues');
 const uploads = new Map();
+let selectedPipelineNode = null;
+let exported = false;
 const imageExtensions = /\.(png|jpe?g|webp)$/i;
 const audioExtensions = /\.(ogg|opus|mp3|wav|flac)$/i;
 const fontExtensions = /\.(ttf|otf|ttc)$/i;
@@ -32,6 +34,112 @@ function message(text, isError = false) {
   status.classList.toggle('error', isError);
   status.setAttribute('role', isError ? 'alert' : 'status');
 }
+
+function updatePipeline() {
+  const rawLength = raw.value.trim().length;
+  const fresh = Boolean(scenario.value.trim() && inspectedText === scenario.value);
+  const lineCount = scenes.reduce((total, scene) => total + scene.lines.length, 0);
+  const speakerCount = new Set(scenes.flatMap((scene) => scene.lines.map((line) => line.speaker).filter(Boolean))).size;
+  const unresolved = scenes.reduce((total, scene) => total + scene.lines.filter((line) => line.speaker === '？').length, 0);
+  let cueCount = 0;
+  const references = new Set();
+  let cueError = false;
+  try {
+    const plan = mapping(cues.value, '演出 JSON');
+    for (const scene of Object.values(plan)) {
+      if (!scene || typeof scene !== 'object' || Array.isArray(scene)) continue;
+      for (const commands of Object.values(scene)) {
+        if (!Array.isArray(commands)) continue;
+        for (const command of commands) {
+          if (!command || typeof command !== 'object' || Array.isArray(command)) continue;
+          cueCount += 1;
+          for (const [kind, value] of Object.entries(command)) {
+            const name = kind === 'show' ? value?.file : value;
+            if (['background', 'show', 'music', 'sound', 'voice'].includes(kind) && typeof name === 'string') references.add(name);
+          }
+        }
+      }
+    }
+  } catch {
+    cueError = true;
+  }
+  const mediaCount = uploads.size;
+  const voiceCount = [...uploads.keys()].filter((name) => audioExtensions.test(name)).length;
+  const candidateCount = field('image-gallery')?.querySelectorAll('figure').length ?? 0;
+  const set = (id, value) => {
+    const node = field(id);
+    if (node) node.textContent = value;
+    document.querySelectorAll(`[data-flow-id="${id}"]`).forEach((item) => { item.textContent = value; });
+  };
+
+  set('flow-raw-state', rawLength ? '已载入' : '等待原文');
+  set('flow-raw-value', rawLength ? `${rawLength.toLocaleString()} 字 · 另带起始章节与说话人映射` : '原文 + 章节起点 + 说话人映射');
+  set('flow-scenario-state', fresh ? `${scenes.length} 场已解析` : scenario.value.trim() ? '待解析 / 有修改' : '等待生成');
+  set('flow-scenario-value', fresh ? `${scenes.length} 场 · ${lineCount} 条台词 · ${speakerCount} 个说话人` : '章节 → 场景 ID → 有序台词与说话人');
+  set('flow-script-state', cueError ? '演出 JSON 有误' : fresh ? `${cueCount} 个动作` : '等待解析');
+  set('flow-script-value', fresh ? `${cueCount} 个动作 · ${references.size} 个文件引用 · 已添加 ${mediaCount} 个文件` : 'Scenario + cue JSON + 实际引用文件');
+  set('flow-export-state', exported ? '已生成并下载' : fresh ? '可构建' : '尚未导出');
+  set('flow-background-state', candidateCount ? `${candidateCount} 张候选` : '候选可生成');
+  set('flow-sprite-state', candidateCount ? `${candidateCount} 张候选` : '可生成候选');
+  set('flow-cg-state', candidateCount ? `${candidateCount} 张候选` : '可生成候选');
+  set('flow-voice-state', voiceCount ? `${voiceCount} 个音频文件` : '可手动挂接');
+
+  const selected = selectedPipelineNode && document.querySelector(`.flow-node[data-node="${selectedPipelineNode}"]`);
+  if (!selected) return;
+  const states = {
+    raw: rawLength ? '已载入' : '等待原文',
+    scenario: fresh ? `${scenes.length} 场已解析` : scenario.value.trim() ? '待解析 / 有修改' : '等待生成',
+    script: cueError ? '演出 JSON 有误' : fresh ? `${cueCount} 个动作` : '等待解析',
+    'background-assets': candidateCount ? `${candidateCount} 张候选图` : '候选可生成',
+    'sprite-assets': candidateCount ? `${candidateCount} 张候选图` : '可生成候选',
+    'cg-assets': candidateCount ? `${candidateCount} 张候选图` : '可生成候选',
+    'voice-assets': voiceCount ? `${voiceCount} 个音频文件` : '可手动挂接',
+    'music-reference': '参考输入',
+    'character-reference': '参考输入',
+    'voice-reference': '参考输入',
+  };
+  set('flow-detail-title', selected.dataset.title);
+  const detailState = field('flow-detail-state');
+  detailState.textContent = states[selectedPipelineNode] || selected.querySelector('.node-state')?.textContent || '规划中';
+  detailState.className = `node-state${selected.classList.contains('is-plan') ? ' is-plan' : selected.classList.contains('is-partial') ? ' is-partial' : selected.classList.contains('is-reference') ? ' is-reference' : ''}`;
+  set('flow-detail-input', selected.dataset.input || '—');
+  set('flow-detail-handoff', selected.dataset.handoff || '—');
+  set('flow-detail-output', selected.dataset.output || '—');
+  const current = {
+    raw: rawLength ? `当前输入：${rawLength.toLocaleString()} 字。` : '当前输入：尚未载入原文。',
+    scenario: fresh ? `当前输出：${scenes.length} 场、${lineCount} 条台词、${speakerCount} 个说话人；${unresolved} 条说话人待确认。` : scenario.value.trim() ? '当前输出：Scenario 已有内容，解析结果未生成或已过期。' : '当前输出：尚未生成 Scenario。',
+    script: cueError ? '当前状态：演出 JSON 解析失败，无法构建。' : `当前传递：${cueCount} 个演出动作、${references.size} 个文件引用；素材区已有 ${mediaCount} 个文件。${[...references].some((name) => !uploads.has(name)) ? '有引用文件尚未加入。' : ''}`,
+    'background-assets': `当前传递：图像工作室有 ${candidateCount} 张候选；需要手动加入素材，再在演出中绑定。`,
+    'sprite-assets': `当前传递：图像工作室有 ${candidateCount} 张候选；立绘差分尚未自动继承角色基准立绘。`,
+    'cg-assets': `当前传递：图像工作室有 ${candidateCount} 张候选；CG 尚未自动继承角色基准立绘。`,
+    'voice-assets': `当前传递：素材区有 ${voiceCount} 个音频文件，Scenario 与 cue 编辑器可手动绑定已录制的语音。`,
+    'music-reference': '当前状态：拓扑定义了音乐参考入口；参考素材的导入与归档控件尚未接入。',
+    'character-reference': '当前状态：拓扑定义了角色参考入口；参考素材的导入与归档控件尚未接入。',
+    'voice-reference': '当前状态：拓扑定义了人声参考入口；参考素材的导入与归档控件尚未接入。',
+  };
+  set('flow-detail-current', current[selectedPipelineNode] || '该分支目前标记为规划中，输入、交接字段和下游用途按制作关系表展示。');
+  const link = field('flow-detail-link');
+  link.hidden = !selected.dataset.target;
+  if (selected.dataset.target) link.href = selected.dataset.target;
+}
+
+document.querySelectorAll('.flow-node').forEach((node) => node.addEventListener('click', () => {
+  document.querySelectorAll('.flow-node[aria-pressed="true"]').forEach((active) => active.setAttribute('aria-pressed', 'false'));
+  selectedPipelineNode = node.dataset.node;
+  document.querySelectorAll(`.flow-node[data-node="${selectedPipelineNode}"]`).forEach((match) => match.setAttribute('aria-pressed', 'true'));
+  document.querySelectorAll('.pipeline-edge').forEach((edge) => {
+    edge.classList.toggle('is-related', edge.dataset.from === selectedPipelineNode || edge.dataset.to === selectedPipelineNode);
+  });
+  updatePipeline();
+}));
+document.querySelectorAll('.route-step[data-target]').forEach((step) => step.addEventListener('click', () => {
+  document.querySelector(step.dataset.target)?.scrollIntoView({behavior: 'smooth', block: 'start'});
+}));
+document.querySelectorAll('#flow-detail-link, .pipeline-heading .section-link').forEach((link) => link.addEventListener('click', (event) => {
+  event.preventDefault();
+  document.querySelector(link.getAttribute('href'))?.scrollIntoView({behavior: 'smooth', block: 'start'});
+}));
+if (field('image-gallery')) new MutationObserver(updatePipeline).observe(field('image-gallery'), {childList: true, subtree: true});
 
 function mapping(value, name) {
   let result;
@@ -107,6 +215,7 @@ function renderLines() {
       selectedLine = {scene: scene.id, index: index + 1, speaker: line.speaker};
       if (line.speaker && line.speaker !== '？') field('actor').value = line.speaker;
       refreshCueForm();
+      updatePipeline();
     });
     list.append(row);
   });
@@ -141,6 +250,7 @@ function invalidateScenes() {
   field('scene-summary').textContent = '等待解析';
   renderLines();
   refreshCueForm();
+  updatePipeline();
 }
 
 async function inspectScenario(text = scenario.value) {
@@ -157,6 +267,7 @@ async function inspectScenario(text = scenario.value) {
   const pending = scenes.reduce((total, scene) => total + scene.lines.filter((line) => line.speaker === '？').length, 0);
   field('scene-summary').textContent = `${scenes.length} 场 · ${pending} 条待校对`;
   message(pending ? `已解析 ${scenes.length} 场。请在 Scenario 中校对 ${pending} 条对白。` : `已解析 ${scenes.length} 场，可以安排演出或直接导出。`);
+  updatePipeline();
 }
 
 async function readText(file) {
@@ -173,7 +284,9 @@ for (const [id, editor] of [['raw-file', raw], ['scenario-file', scenario], ['cu
       const content = await readText(file);
       if (editor === cues) mapping(content, '演出 JSON');
       editor.value = content;
-      if (editor === scenario) invalidateScenes();
+      if (editor === scenario) { exported = false; invalidateScenes(); }
+      if (editor === cues) exported = false;
+      updatePipeline();
       message(`已导入 ${file.name}。`);
     } catch (error) {
       message(`无法导入 ${file.name}。${error.message}`, true);
@@ -181,16 +294,20 @@ for (const [id, editor] of [['raw-file', raw], ['scenario-file', scenario], ['cu
   });
 }
 
+raw.addEventListener('input', () => { exported = false; updatePipeline(); });
 field('sample').addEventListener('click', () => {
   if (raw.value.trim() && !confirm('替换原文和说话人映射？')) return;
   raw.value = sample;
   field('heading').value = '';
   field('speakers').value = '{"6": "林岚", "7": "周明"}';
+  exported = false;
+  updatePipeline();
   message('已载入车站样例，点击「生成 Scenario」继续。');
 });
 
 field('draft').addEventListener('click', (event) => {
   if (scenario.value.trim() && !confirm('用新草稿替换当前 Scenario？')) return;
+  exported = false;
   run(event.currentTarget, '正在生成 Scenario…', async () => {
     const previous = scenario.value;
     const response = await request('/api/draft', {
@@ -206,7 +323,8 @@ field('draft').addEventListener('click', (event) => {
   });
 });
 
-scenario.addEventListener('input', invalidateScenes);
+scenario.addEventListener('input', () => { exported = false; invalidateScenes(); });
+cues.addEventListener('input', () => { exported = false; updatePipeline(); });
 field('inspect').addEventListener('click', (event) => run(event.currentTarget, '正在解析场景…', () => inspectScenario()));
 field('save-scenario').addEventListener('click', () => {
   if (!scenario.value.trim()) return message('请先填写 Scenario。', true);
@@ -224,9 +342,11 @@ sceneSelect.addEventListener('change', () => {
   selectedLine = null;
   renderLines();
   refreshCueForm();
+  updatePipeline();
 });
 
 function renderFiles() {
+  exported = false;
   const list = field('file-list');
   list.replaceChildren();
   const selectedFont = font.value;
@@ -246,6 +366,7 @@ function renderFiles() {
   if (!uploads.size) list.textContent = '可添加图片、音频和字体。素材文件按名称引用。';
   if (uploads.has(selectedFont)) font.value = selectedFont;
   refreshCueForm();
+  updatePipeline();
 }
 
 field('files').addEventListener('change', (event) => {
@@ -257,6 +378,7 @@ field('files').addEventListener('change', (event) => {
   renderFiles();
 });
 action.addEventListener('change', refreshCueForm);
+font.addEventListener('change', () => { exported = false; updatePipeline(); });
 
 field('cue-form').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -284,6 +406,8 @@ field('cue-form').addEventListener('submit', (event) => {
     }
     commands.push(cue);
     cues.value = JSON.stringify(plan, null, 2);
+    exported = false;
+    updatePipeline();
     message(`已为 ${selectedLine.scene}/${selectedLine.index} 添加演出动作。`);
   } catch (error) {
     message(error.message, true);
@@ -300,6 +424,8 @@ function encode(file) {
 }
 
 field('build').addEventListener('click', (event) => run(event.currentTarget, '正在构建 Ren’Py 工程…', async () => {
+  exported = false;
+  updatePipeline();
   const text = scenario.value;
   const planText = cues.value;
   const plan = mapping(planText, '演出 JSON');
@@ -332,7 +458,15 @@ field('build').addEventListener('click', (event) => run(event.currentTarget, '�
   const encoded = Object.fromEntries(await Promise.all(files.map(async (file) => [file.name, await encode(file)])));
   const response = await request('/api/build', {scenario: text, cues: planText, font: chosenFont, files: encoded});
   download(await response.blob(), 'prisma-renpy.zip');
+  exported = true;
+  updatePipeline();
   message('Ren’Py 工程已开始下载。');
 }));
 
 refreshCueForm();
+selectedPipelineNode = 'scenario';
+document.querySelectorAll('.flow-node[data-node="scenario"]').forEach((node) => node.setAttribute('aria-pressed', 'true'));
+document.querySelectorAll('.pipeline-edge').forEach((edge) => {
+  edge.classList.toggle('is-related', edge.dataset.from === selectedPipelineNode || edge.dataset.to === selectedPipelineNode);
+});
+updatePipeline();
