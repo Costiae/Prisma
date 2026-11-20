@@ -16,7 +16,7 @@ import uuid
 
 ACTIVE = {'running', 'cancelling'}
 JOB_ID = re.compile(r'[0-9a-f]{16}')
-INDEX_PROJECTION = 2
+INDEX_PROJECTION = 3
 
 
 class Cancelled(Exception):
@@ -193,11 +193,11 @@ class Jobs:
                 data['log'] = '\n'.join(log.splitlines()[-24:])
         return data
 
-    def recent(self):
+    def recent(self, *, project=None, shared=False):
         if not self.index_ready:
             self.refresh_index()
         result = []
-        for row in self.library.list(kind='job', limit=24)['items']:
+        for row in self.library.list(kind='job', limit=24, project=project, shared=shared)['items']:
             try:
                 job = self.get(row['id'])
             except (OSError, ValueError, KeyError):

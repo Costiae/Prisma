@@ -11,7 +11,10 @@ from urllib.parse import quote
 from image_toolkit import IMAGE_TYPES, ONLINE_MODELS, ONLINE_SIZES, SAMPLERS
 from image_library import KINDS
 from lora_export import save_export
+from pipeline_workflow import NODES, REFERENCE_KINDS, PipelineWorkflow
 from prisma_workflow import StudioWorkflow, inspect, make_archive
+from script_editor import ScriptEditor
+from script_story import inspect_story
 
 
 VERSIONS = ('2025-11-25', '2025-06-18', '2025-03-26')
@@ -28,16 +31,25 @@ OBJECT = schema('object')
 JOB = schema('string', pattern='^[0-9a-f]{16}$')
 
 
-def enum(*options):
-    return schema('string', enum=options)
-
-
 def row(properties, required, *, extra=False):
     return schema('object', properties=properties, required=list(required), additionalProperties=extra)
 
 
+PROJECT_CONFIG = schema('object', additionalProperties=True)
+
+
+def enum(*options):
+    return schema('string', enum=options)
+
+
 DATASET_ITEM = row({'name': TEXT, 'caption': TEXT, 'data': schema('string', description='Optional base64 image. Otherwise read from source.')}, ('name',))
 IMAGE_ASSET = row({'job_id': JOB, 'name': TEXT}, ('job_id', 'name'))
+SCENARIO = {'type': ['object', 'string'], 'description':
+            'Scenario JSON v1: {version:1, chapters:[{id:"1", title, scenes:[{id:"1:1", lines:[{id, speaker, text}]}]}]}. '
+            'Use null for a narrator; preserve line IDs on edits. Legacy Markdown text is accepted for import.'}
+SCRIPT_INPUT = {'scenario': SCENARIO, 'cues': {'type': ['object', 'string']}, 'font': TEXT,
+                    'asset_ids': schema('object', additionalProperties=TEXT), 'project_id': JOB,
+                'config': PROJECT_CONFIG, 'project_title': TEXT}
 
 
 def rpc_error(ident, code, message):
@@ -48,37 +60,92 @@ class PrismaMCP:
     def __init__(self, images, base_url):
         self.images = images
         self.workflow = StudioWorkflow(images.resources)
+        self.pipeline = PipelineWorkflow(images.resources)
+        self.script_editor = ScriptEditor(images.resources, self.pipeline)
         self.base_url = base_url
         self.exports = images.home / 'exports'
         self.tools = {}
         tool = self.register
-        tool('scenario_draft', 'Turn raw script text into editable Scenario and register its source and draft. Set line_ids to include stable text item IDs.',
-             self.workflow.draft, {'raw': TEXT, 'speakers': OBJECT, 'heading': TEXT, 'line_ids': BOOL}, ('raw',))
-        tool('scenario_inspect', 'List scenes, speakers, text positions, and any stable text item IDs.', inspect,
-             {'scenario': TEXT}, ('scenario',), read_only=True)
+        tool('scenario_draft', 'Turn raw script text into a Scenario JSON object with stable line IDs and original line references. For a project, use its global text LLM settings unless the Scenario task override is enabled.',
+             self.workflow.draft, {'raw': TEXT, 'speakers': OBJECT, 'heading': TEXT, 'line_ids': BOOL,
+                                  'project_id': JOB, 'config': PROJECT_CONFIG}, ('raw',))
+        tool('llm_status', 'Read whether the server has a text-generation API key configured without revealing the secret.',
+             self.workflow.llm_status, {}, read_only=True)
+        tool('scenario_inspect', 'Return normalized Scenario JSON and list scenes, speakers, and stable text item IDs.', inspect,
+             {'scenario': SCENARIO}, ('scenario',), read_only=True)
         tool('scenario_save', 'Register edited source, Scenario and cues without changing their content.',
-             self.workflow.save_documents, {'raw': TEXT, 'scenario': TEXT, 'cues': {'type': ['object', 'string']}})
+             self.workflow.save_documents, {'raw': TEXT, 'scenario': SCENARIO, 'cues': {'type': ['object', 'string']},
+                                            'project_id': JOB})
         tool('scenario_anchor', 'Add stable IDs to text items, convert cues to by_line_id, and register both revisions.',
-             self.workflow.anchor, {'scenario': TEXT, 'cues': {'type': ['object', 'string']}}, ('scenario',))
+             self.workflow.anchor, {'scenario': SCENARIO, 'cues': {'type': ['object', 'string']}, 'project_id': JOB}, ('scenario',))
         tool('scenario_asset_prompt', 'Register a background, sprite or CG prompt with the nearby Scenario lines for review.', self.workflow.asset_prompt,
-             {'scenario': TEXT, 'scene': TEXT, 'kind': enum('background', 'sprite', 'cg'), 'line': INT,
-              'brief': TEXT, 'trigger': TEXT}, ('scenario', 'scene', 'kind'))
+             {'scenario': SCENARIO, 'scene': TEXT, 'kind': enum('background', 'sprite', 'cg'), 'line': INT,
+              'brief': TEXT, 'trigger': TEXT, 'project_id': JOB}, ('scenario', 'scene', 'kind'))
+        tool('script_preview', 'Compile Ren’Py in memory with scene, dialogue and asset mappings.',
+             self.workflow.preview_script, SCRIPT_INPUT, ('scenario',), read_only=True)
+        tool('script_bind', 'Insert or replace one cue on a specific line and return the regenerated Ren’Py script.',
+             self.workflow.bind_script, {**SCRIPT_INPUT, 'scene': TEXT, 'index': INT, 'line_id': TEXT,
+                                         'cue': OBJECT, 'replace': INT}, ('scenario', 'scene', 'index', 'cue'))
+        tool('script_editor_open', 'Read the latest editable Ren’Py draft or a prior revision in this project.',
+             self.script_editor.open, {'project_id': JOB, 'revision': TEXT}, ('project_id',), read_only=True)
+        tool('script_editor_save', 'Save an editable Ren’Py revision. Pass the last draft ID as base and the managed asset map from preview or insert.',
+             self.script_editor.save, {'project_id': JOB, 'base': TEXT, 'text': TEXT,
+                                       'managed_assets': schema('object', additionalProperties=TEXT)},
+             ('project_id', 'base', 'text'))
+        tool('script_editor_asset', 'Return a portable path and a Ren’Py snippet for a current approved asset.',
+             self.script_editor.prepare_asset, {'project_id': JOB, 'asset_id': TEXT,
+                'action': enum('path', 'background', 'portrait', 'music', 'sound', 'voice')},
+             ('project_id', 'asset_id', 'action'), read_only=True)
+        tool('script_story_inspect', 'Read the label outline, characters, and editable rows of one scene in a Ren’Py script.',
+             inspect_story, {'text': TEXT, 'scene': TEXT}, ('text',), read_only=True)
+        tool('script_story_edit', 'Apply a scene or row edit to Ren’Py text, preserving source outside the edited row. Returns text and newly referenced assets for script_editor_save.',
+             self.script_editor.edit_story, {'text': TEXT, 'scene': TEXT, 'project_id': JOB, 'line': INT, 'row': OBJECT,
+                                             'operation': enum('add_scene', 'add_character', 'insert', 'replace', 'delete')},
+             ('text', 'scene', 'operation'))
         tool('image_catalog', 'List online readiness, local installation, reference sources, LoRAs, and recent jobs.',
-             lambda _: images.catalog(), {}, read_only=True)
+             lambda data: images.catalog(data.get('project_id')), {'project_id': JOB}, read_only=True)
         tool('library_list', 'Search the workspace catalog by category, label, ID, path, or recorded options. Returns paginated records.',
-             images.library_list, {'kind': enum(*KINDS), 'query': TEXT, 'limit': INT, 'offset': INT}, read_only=True)
+             images.library_list, {'kind': enum(*KINDS), 'query': TEXT, 'limit': INT, 'offset': INT,
+                                   'project_id': JOB, 'shared': BOOL}, read_only=True)
         tool('library_item', 'Read a catalog record with metadata and related records, including source jobs, models, datasets, LoRAs, and exports.',
              images.library_item, {'kind': enum(*KINDS), 'id': TEXT}, ('kind', 'id'), read_only=True)
         tool('library_refresh', 'Reconcile the SQLite catalog with existing Prisma task manifests, datasets, model files, and exports.',
              images.refresh_library, {})
         tool('project_save', 'Save a new project or a new revision. Updating a project requires the latest revision ID.',
              images.resources.save_project, {'id': JOB, 'revision': TEXT, 'title': TEXT, 'raw': TEXT,
-                'scenario': TEXT, 'cues': OBJECT, 'assets': schema('object', additionalProperties=TEXT),
-                'font': TEXT, 'heading': TEXT, 'speakers': OBJECT}, ('title',))
+                'scenario': SCENARIO, 'cues': OBJECT, 'assets': schema('object', additionalProperties=TEXT),
+                'font': TEXT, 'heading': TEXT, 'speakers': OBJECT, 'config': PROJECT_CONFIG}, ('title',))
         tool('project_open', 'Load a project and its current or requested revision. Includes Scenario, cues and reusable asset IDs.',
              self.open_project, {'id': JOB, 'revision': TEXT}, ('id',), read_only=True)
+        tool('project_history', 'List the current project revision and its previous versions.',
+             images.resources.project_history, {'id': JOB}, ('id',), read_only=True)
+        tool('project_undo', 'Restore the previous project revision by writing it as a new revision.',
+             images.resources.undo_project, {'id': JOB}, ('id',))
+        tool('project_restore', 'Restore a selected historical project revision by writing it as a new revision.',
+             images.resources.restore_project_revision, {'id': JOB, 'revision': TEXT}, ('id', 'revision'))
+        tool('project_list', 'List active projects or projects in the trash.',
+             images.resources.list_projects, {'trash': BOOL, 'offset': INT}, read_only=True)
+        tool('project_delete', 'Move the project to the trash. Its revisions and files are retained.',
+             lambda data: images.resources.set_project_trash(data, trash=True), {'id': JOB}, ('id',), destructive=True)
+        tool('project_restore_deleted', 'Restore a project from the trash with its revisions and files.',
+             lambda data: images.resources.set_project_trash(data, trash=False), {'id': JOB}, ('id',))
+        stage = {'project_id': JOB, 'node': enum(*NODES)}
+        tool('pipeline_state', 'Read the project graph and the current result version of each node.',
+             self.pipeline.state, {'project_id': JOB}, ('project_id',), read_only=True)
+        tool('pipeline_inputs', 'Read only the current input versions passed to this node by direct upstream nodes.',
+             self.pipeline.inputs, stage, ('project_id', 'node'), read_only=True)
+        tool('pipeline_approved', 'List current approved project outputs and their resource IDs. Specify a node to read its full output notes. needs_review indicates changed upstream versions.',
+             self.pipeline.approved, stage, ('project_id',), read_only=True)
+        tool('pipeline_reusable', 'Find available project and shared artifacts that the node can reuse.',
+             self.pipeline.reusable, {**stage, 'query': TEXT}, ('project_id', 'node'), read_only=True)
+        tool('pipeline_action', 'Record a node result version, retry a node, or pass its current output to every direct downstream node. Node versions belong to a single project.',
+             self.pipeline.decide, {**stage, 'decision': enum('retry', 'pass'), 'base': TEXT,
+                 'content': TEXT,
+                 'references': schema('array', items=OBJECT), 'capture_project': BOOL,
+                 'output': OBJECT, 'inputs': OBJECT}, ('project_id', 'node', 'decision', 'base'))
         tool('asset_import', 'Register media from base64, reuse an existing asset by library ID, or reuse a generated image.',
-             images.import_workspace_asset, {'name': TEXT, 'data': TEXT, 'artifact': IMAGE_ASSET, 'library_id': TEXT})
+             images.import_workspace_asset, {'name': TEXT, 'data': TEXT, 'artifact': IMAGE_ASSET, 'library_id': TEXT,
+                                              'project_id': JOB})
         tool('image_install', 'Download and validate missing local components. Inference installs the Windows Vulkan engine and SD 1.x base; training installs the CUDA or Apple MPS environment and selected SD 1.x or Animagine XL 4.0 anime SDXL base. On Apple Silicon, iris3b or anima installs MFlux and Apple MLX with the selected model snapshot for local LoRA training. Anima Base is anime-specific; its model and derivatives are limited to non-commercial use.',
              images.provision, {'target': enum('inference', 'training'), 'base_model': enum('sd1', 'sdxl', 'iris3b', 'anima')},
              ('target',), open_world=True)
@@ -87,22 +154,24 @@ class PrismaMCP:
         tool('dataset_image', 'Inspect a reference or saved training image for selection and captioning. Returns image content and its download URL.',
              self.dataset_image, {'source': TEXT, 'name': TEXT}, ('source', 'name'), read_only=True)
         tool('dataset_save', 'Save selected reference files and captions, or import PNG/JPEG/WebP as base64. Returns a new dataset ID and ZIP link.',
-             self.save_dataset, {'name': TEXT, 'source': TEXT, 'trigger': TEXT,
+             self.save_dataset, {'name': TEXT, 'source': TEXT, 'trigger': TEXT, 'project_id': JOB,
                                  'items': schema('array', items=DATASET_ITEM, minItems=1, maxItems=150)},
              ('name', 'items'))
         tool('dataset_export', 'Export or reuse the dataset ZIP. Returns the manifest, local directory, and download URL.',
              self.dataset_export, {'id': JOB}, ('id',))
         tool('dataset_restore', 'Restore an exported dataset with the same ID, names and hashes. Supply its ZIP as base64 or omit data to read the extracted snapshot from the configured reference directory.',
-             images.restore_dataset, {'data': TEXT})
-        tool('lora_import', 'Import a compatible SD 1.x safetensors LoRA as base64 (up to 45 MiB).',
-             images.import_lora, {'name': TEXT, 'data': TEXT}, ('name', 'data'))
+             images.restore_dataset, {'data': TEXT, 'project_id': JOB})
+        tool('lora_import', 'Import an existing safetensors LoRA as base64 (up to 45 MiB). Specify the matching base family.',
+             images.import_lora, {'name': TEXT, 'data': TEXT, 'family': enum('sd1', 'sdxl', 'anima'), 'project_id': JOB}, ('name', 'data'))
+        tool('lora_prepare', 'Select an existing LoRA for local generation and report whether its runtime is ready. Returns image_generate parameters.',
+             images.prepare_lora, {'id': TEXT, 'project_id': JOB}, ('id',), read_only=True)
         tool('lora_export', 'Export selected LoRA IDs and their saved training datasets and records as a portable Prisma workspace ZIP. Base model dependencies are recorded in the manifest.',
-             self.lora_export, {'loras': schema('array', items=TEXT, minItems=1)}, ('loras',))
+             self.lora_export, {'loras': schema('array', items=TEXT, minItems=1), 'project_id': JOB}, ('loras',))
         tool('lora_train', 'Train an SD 1.x, SDXL, Apple Silicon Iris-3B, or anime-specific Anima Base LoRA on a saved dataset. Set parent_lora to continue a compatible SD 1.x or SDXL LoRA from its existing weights. Iris and Anima use MFlux on Apple MLX at 512 px with gradient checkpointing; Anima writes ComfyUI-compatible LoRA weights. Anima and its derivatives are limited to non-commercial use. Check image_job for checkpoints and provenance.',
              images.train, {'dataset': JOB, 'name': TEXT, 'base_model': enum('sd1', 'sdxl', 'iris3b', 'anima'),
                             'steps': INT, 'save_every': INT, 'rank': INT,
                             'lr': schema('number'), 'repeats': INT, 'seed': INT,
-                            'parent_lora': TEXT}, ('dataset', 'name'))
+                            'parent_lora': TEXT, 'project_id': JOB}, ('dataset', 'name'))
         tool('image_generate', 'Queue local inference or an online API call. Online sends the prompt and uses account quota. Locally, use base_model anima, sdxl, or sd1 to choose a base without a LoRA; use [""] for the selected base or two compatible LoRA IDs for matched seeds. Anima runs with Apple MLX and accepts er_sde or euler sampling.',
              images.generate, {'mode': enum('local', 'online'), 'prompt': TEXT, 'count': INT,
                                'model': enum(*ONLINE_MODELS), 'size': enum(*ONLINE_SIZES),
@@ -124,10 +193,11 @@ class PrismaMCP:
              self.artifact, {'id': JOB, 'category': enum('images', 'checkpoints'), 'name': TEXT, 'preview': BOOL},
              ('id', 'category', 'name'), read_only=True)
         tool('renpy_export', 'Build a Ren’Py ZIP. Bind generated images by job ID and filename using image_assets. Ordinary files can be supplied as base64.',
-             self.export, {'scenario': TEXT, 'cues': {'type': ['object', 'string']}, 'font': TEXT,
+             self.export, {'scenario': SCENARIO, 'cues': {'type': ['object', 'string']}, 'font': TEXT,
                            'image_assets': schema('object', additionalProperties=IMAGE_ASSET),
-                           'files': schema('object', additionalProperties=TEXT),
-                           'asset_ids': schema('object', additionalProperties=TEXT), 'project_id': JOB}, ('scenario',))
+                           'files': schema('object', additionalProperties=TEXT), 'config': PROJECT_CONFIG,
+                           'project_title': TEXT, 'script_id': TEXT,
+                           'asset_ids': schema('object', additionalProperties=TEXT), 'project_id': JOB})
 
     def register(self, name, description, handler, fields, required=(), *, read_only=False, destructive=False, open_world=False):
         self.tools[name] = (handler, dict(name=name, description=description, inputSchema=row(fields, required),
@@ -200,13 +270,31 @@ class PrismaMCP:
     def export(self, args):
         ident = secrets.token_hex(8)
         links = []
+        approved_script = None
         if project := args.get('project_id'):
-            self.images.library_item({'kind': 'project', 'id': project})
             links.append(('for_project', 'project', project))
+            settings = self.images.resources.load_project({'id': project})
+            args.setdefault('config', settings.get('config'))
+            args.setdefault('project_title', settings['title'])
+        if script_id := args.get('script_id'):
+            accepted = self.pipeline.inputs({'project_id': project, 'node': 'export'})['inputs']
+            if not any(ref['kind'] == 'script' and ref['id'] == script_id
+                       for entry in accepted for ref in entry['references']):
+                raise ValueError('请先从「脚本生成」通过当前版本，再导出工程。')
+            approved_script = self.images.library.get('script', script_id)['metadata']
+            links.append(('from_script', 'script', script_id))
         self.exports.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='export-', dir=self.exports) as temporary:
             stage = Path(temporary)
-            archive = make_archive(args, stage, self.images.artifact, resources=self.images.resources, links=links)
+            if approved_script is not None and 'managed_assets' in approved_script:
+                archive = self.script_editor.make_archive(project, stage, approved_script)
+                links.extend(('uses_asset', 'asset', ident) for ident in set(approved_script['managed_assets'].values()))
+            else:
+                if approved_script is not None and args.get('scenario') is None:
+                    args.update(scenario=settings['scenario'], cues=settings['cues'],
+                                font=settings['font'], asset_ids=settings['assets'])
+                archive = make_archive(args, stage, self.images.artifact, resources=self.images.resources,
+                                       links=links, approved_script=approved_script and approved_script['text'])
             out = stage / ident
             out.mkdir()
             archive.rename(out / archive.name)
@@ -230,6 +318,8 @@ class PrismaMCP:
         for field, value in args.items():
             validate_input(value, spec['properties'][field], field)
         try:
+            if args.get('project_id'):
+                self.images.resources.project_record(args['project_id'])
             output = handler(args)
         except (OSError, ValueError) as error:
             return {'isError': True, 'content': [{'type': 'text', 'text': str(error)}]}

@@ -1,0 +1,547 @@
+[
+  {
+    "id": "raw",
+    "title": "Raw Text",
+    "kind": "live",
+    "input": "导入 UTF-8 原文或在编辑器粘贴。",
+    "output": "原文、起始章节和按原文行号填写的说话人映射。",
+    "workspace": "raw-panel",
+    "snapshot": "source",
+    "depends_on": [],
+    "work_label": "查看或编辑原文",
+    "reuse": [
+      "source"
+    ],
+    "panels": [
+      "raw-panel"
+    ]
+  },
+  {
+    "id": "scenario",
+    "title": "Scenario",
+    "kind": "live",
+    "input": "从原文生成，或导入 Scenario JSON / 旧版 Markdown。",
+    "output": "章节、场景、说话人、文本、稳定台词 ID，及可选视角、动作和原文行号。",
+    "workspace": "scenario-panel",
+    "snapshot": "scenario",
+    "depends_on": [
+      "raw"
+    ],
+    "work_label": "查看或编辑剧本",
+    "reuse": [
+      "scenario"
+    ],
+    "panels": [
+      "settings-llm",
+      "scenario-draft-controls",
+      "scenario-panel",
+      "scene-panel"
+    ],
+    "retry_control": "draft"
+  },
+  {
+    "id": "prompt",
+    "title": "资产提示词",
+    "kind": "live",
+    "input": "选中的场景、台词附近的文本、素材类别，以及作者补充的画面说明。",
+    "output": "scenario_asset_prompt 登记正负提示词和场景上下文。WebUI 可把场景参考带入编辑框继续修改。",
+    "workspace": "image-form",
+    "depends_on": [
+      "scenario"
+    ],
+    "work_label": "编写资产提示词",
+    "reuse": [
+      "prompt"
+    ],
+    "panels": [
+      "image-status",
+      "image-prompt-tools",
+      "image-negative-row",
+      "settings-prompts"
+    ],
+    "retry_control": "image-scene"
+  },
+  {
+    "id": "online",
+    "title": "在线图像 API",
+    "kind": "live",
+    "input": "配置服务端 API 密钥后，在图像生成选择在线模式。",
+    "output": "正向提示词、在线模型、尺寸、质量和张数。",
+    "workspace": "image-form",
+    "depends_on": [],
+    "work_label": "配置在线出图",
+    "reuse": [
+      "model"
+    ],
+    "panels": [
+      "image-status",
+      "image-form"
+    ]
+  },
+  {
+    "id": "generation",
+    "title": "图像生成",
+    "kind": "live",
+    "input": "可使用场景生成的提示词，也可直接输入提示词或载入样例。",
+    "output": "image_generate 记录实际提示词和参数。本地模式可选兼容 LoRA 并按相同 Seed 对照。",
+    "workspace": "image-studio",
+    "depends_on": [
+      "prompt",
+      "online",
+      "models"
+    ],
+    "work_label": "生成新图像",
+    "reuse": [
+      "job",
+      "prompt"
+    ],
+    "panels": [
+      "image-status",
+      "image-form",
+      "image-results"
+    ],
+    "retry_control": "image-generate"
+  },
+  {
+    "id": "candidates",
+    "title": "任务与候选",
+    "kind": "live",
+    "input": "查看当前项目的生成任务并选择一个任务。",
+    "output": "任务 ID、状态、参数、来源提示词、日志和产物文件。",
+    "workspace": "image-results",
+    "activity": "candidates",
+    "depends_on": [
+      "generation"
+    ],
+    "work_label": "查看候选图与任务",
+    "reuse": [
+      "artifact",
+      "asset"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "image-results",
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "external-assets",
+    "title": "外部素材",
+    "kind": "partial",
+    "input": "上传现成图片、音频和字体，或从共享库选取可用记录。",
+    "output": "文件名、素材 ID，以及已知的来源或原件。",
+    "workspace": "assets",
+    "depends_on": [],
+    "work_label": "导入现成素材",
+    "reuse": [
+      "asset"
+    ],
+    "panels": [
+      "asset-panel",
+      "image-library"
+    ],
+    "snapshot": "assets"
+  },
+  {
+    "id": "assets",
+    "title": "项目素材",
+    "kind": "live",
+    "input": "已选候选图、上传文件或从共享资源库加入的素材。",
+    "output": "项目所用素材的文件名到素材 ID 映射。图片与音频可在素材页预览。",
+    "workspace": "assets",
+    "snapshot": "assets",
+    "depends_on": [
+      "candidates",
+      "external-assets"
+    ],
+    "work_label": "管理项目素材",
+    "reuse": [
+      "asset",
+      "artifact"
+    ],
+    "panels": [
+      "asset-panel",
+      "image-library"
+    ]
+  },
+  {
+    "id": "cues",
+    "title": "演出绑定",
+    "kind": "live",
+    "input": "Scenario 的台词位置，以及参与演出的项目素材。",
+    "output": "cues 记录背景、立绘显示和隐藏、音乐、音效、配音等动作。新版绑定使用稳定台词 ID。",
+    "workspace": "script-workbench",
+    "snapshot": "cues",
+    "depends_on": [
+      "assets",
+      "scenario"
+    ],
+    "work_label": "编辑演出绑定",
+    "reuse": [
+      "cues"
+    ],
+    "panels": [
+      "script-workbench",
+      "cue-panel"
+    ],
+    "retry_control": "script-preview"
+  },
+  {
+    "id": "script",
+    "title": "脚本 IDE",
+    "kind": "live",
+    "input": "Scenario、演出绑定、实际引用的素材和可选字体。",
+    "output": "从 Scenario 生成可编辑的 Ren’Py 源码，插入已通过资产并保存脚本版本。通过后将该版本交给导出。",
+    "workspace": "script-ide",
+    "depends_on": [
+      "cues",
+      "assets"
+    ],
+    "work_label": "编辑 Ren’Py 脚本",
+    "reuse": [
+      "script"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "script-ide"
+    ],
+    "retry_control": "ide-generate"
+  },
+  {
+    "id": "export",
+    "title": "Ren’Py 导出",
+    "kind": "live",
+    "input": "已通过的 Ren’Py 脚本版本与该版本引用的媒体和字体。",
+    "output": "renpy_export 将该版本的源码写入 game/script.rpy，复制相关素材，并登记导出记录。",
+    "workspace": "export-panel",
+    "activity": "export",
+    "depends_on": [
+      "script"
+    ],
+    "work_label": "导出新工程",
+    "reuse": [
+      "export"
+    ],
+    "panels": [
+      "settings-identity",
+      "export-tools"
+    ],
+    "retry_control": "build"
+  },
+  {
+    "id": "models",
+    "title": "本地模型与工具",
+    "kind": "live",
+    "input": "按平台安装推理组件和底模。可导入 LoRA，或使用已有训练检查点。",
+    "output": "底模、LoRA、Seed、采样器、尺寸和推理参数由本地生成任务记录。",
+    "workspace": "local-toolkit",
+    "depends_on": [
+      {
+        "node": "train",
+        "feedback": true
+      }
+    ],
+    "work_label": "管理底模与推理工具",
+    "reuse": [
+      "lora",
+      "model",
+      "tool"
+    ],
+    "reuse_workspace": "image-existing-lora",
+    "reuse_label": "使用或导入已有权重",
+    "panels": [
+      "toolkit-status",
+      "image-existing-lora",
+      "image-toolchain"
+    ]
+  },
+  {
+    "id": "dataset",
+    "title": "训练数据集",
+    "kind": "live",
+    "input": "从参考目录或上传图片与标注，或恢复已有数据集 ZIP。",
+    "output": "保存选图、标注、触发词和文件哈希。",
+    "workspace": "image-dataset-form",
+    "depends_on": [],
+    "work_label": "建立或恢复数据集",
+    "reuse": [
+      "dataset"
+    ],
+    "panels": [
+      "toolkit-status",
+      "image-dataset-form"
+    ]
+  },
+  {
+    "id": "train",
+    "title": "LoRA 训练",
+    "kind": "live",
+    "input": "训练数据集、选定底模、训练参数和可选续训起点。",
+    "output": "训练任务登记训练配置、日志与检查点。",
+    "workspace": "image-train-form",
+    "depends_on": [
+      "dataset",
+      "models"
+    ],
+    "work_label": "训练新 LoRA",
+    "reuse": [
+      "lora"
+    ],
+    "reuse_workspace": "image-existing-lora",
+    "reuse_label": "使用或导入已有权重",
+    "panels": [
+      "toolkit-status",
+      "image-existing-lora",
+      "image-train-form",
+      "image-results"
+    ],
+    "retry_control": "image-train"
+  },
+  {
+    "id": "chapter-brief",
+    "title": "章节梗概",
+    "kind": "plan",
+    "input": "Scenario 对应章节的场景与台词。",
+    "output": "拟整理章节事件、人物变化和上下文承接。",
+    "depends_on": [
+      "scenario"
+    ],
+    "reuse": [
+      "source",
+      "asset"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "content-overview",
+    "title": "内容总览",
+    "kind": "plan",
+    "input": "完整的 Scenario。",
+    "output": "拟整理时空范围、地点、世界观和作品基调。",
+    "depends_on": [
+      "scenario"
+    ],
+    "reuse": [
+      "source",
+      "asset"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "background-assets",
+    "title": "背景需求整理",
+    "kind": "plan",
+    "input": "内容总览以及场景地点、时间和构图要求。",
+    "output": "拟形成可复用的场景背景需求。",
+    "depends_on": [
+      "content-overview"
+    ],
+    "reuse": [
+      "prompt",
+      "asset"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "music-reference",
+    "title": "音乐参考",
+    "kind": "reference",
+    "input": "作者提供的音乐样例和方向。",
+    "output": "用于说明曲风、配器、情绪和节奏。",
+    "depends_on": [],
+    "reuse": [
+      "asset",
+      "source"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "music-assets",
+    "title": "音乐与音效生成",
+    "kind": "plan",
+    "input": "场景情绪、音效需求和音乐参考。",
+    "output": "拟保存音频生成参数和候选文件。",
+    "depends_on": [
+      "content-overview",
+      "music-reference"
+    ],
+    "reuse": [
+      "asset",
+      "artifact"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "character-overview",
+    "title": "角色概览",
+    "kind": "plan",
+    "input": "Scenario 中角色相关的行动、对白、称谓和关系。",
+    "output": "拟整理角色身份、外观和声音线索。",
+    "depends_on": [
+      "scenario"
+    ],
+    "reuse": [
+      "source",
+      "asset"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "character-reference",
+    "title": "角色参考",
+    "kind": "reference",
+    "input": "作者提供的角色图像与描述。",
+    "output": "拟作为角色形象与外观一致性的参考。",
+    "depends_on": [],
+    "reuse": [
+      "asset",
+      "source"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "portrait-baseline",
+    "title": "角色基准立绘",
+    "kind": "plan",
+    "input": "角色概览、作者参考及独立生成的候选。",
+    "output": "拟把人工确认的角色外观、画布和站位登记为可引用的 CharaDesign 母版。",
+    "depends_on": [
+      "character-overview",
+      "character-reference"
+    ],
+    "reuse": [
+      "asset",
+      "artifact"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "sprite-assets",
+    "title": "立绘表情差分",
+    "kind": "plan",
+    "input": "已确认的 CharaDesign 母版与表情指令。",
+    "output": "拟记录差分使用的母版版本和改动范围。",
+    "depends_on": [
+      "portrait-baseline"
+    ],
+    "reuse": [
+      "asset",
+      "artifact"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "cg-assets",
+    "title": "CG 一致性",
+    "kind": "plan",
+    "input": "已确认的角色母版、场景与动作要求。",
+    "output": "拟登记 CG 使用的角色外观和参考版本。",
+    "depends_on": [
+      "portrait-baseline"
+    ],
+    "reuse": [
+      "asset",
+      "artifact"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "voice-reference",
+    "title": "人声参考",
+    "kind": "reference",
+    "input": "作者提供的人声样例或音色要求。",
+    "output": "拟保存日语发音、语速和表演方向。",
+    "depends_on": [],
+    "reuse": [
+      "asset",
+      "source"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "voice-baseline",
+    "title": "角色声音基准",
+    "kind": "plan",
+    "input": "角色概览和人声参考。",
+    "output": "拟确认角色专属音色、发音、语速和表演规则。",
+    "depends_on": [
+      "character-overview",
+      "voice-reference"
+    ],
+    "reuse": [
+      "asset",
+      "source"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  },
+  {
+    "id": "voice-assets",
+    "title": "台词语音生成",
+    "kind": "plan",
+    "input": "已确认的台词、说话人和角色声音基准。",
+    "output": "拟按台词生成语音并维护素材与台词 ID 的关系。",
+    "depends_on": [
+      "voice-baseline"
+    ],
+    "reuse": [
+      "asset",
+      "artifact"
+    ],
+    "reuse_workspace": "assets",
+    "reuse_label": "导入已有素材",
+    "panels": [
+      "asset-panel"
+    ]
+  }
+]
+

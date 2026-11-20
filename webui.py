@@ -6,13 +6,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import shutil
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from image_jobs import Busy, JOB_ID, own_workspace
 from image_toolkit import IMAGE_TYPES, ImageToolkit, child_file
 from lora_export import ARCHIVE_NAME, save_export
 from prisma_mcp import PrismaMCP, VERSIONS, rpc_error
 from prisma_workflow import inspect, require_text
+from script_story import inspect_story
 
 
 ROOT = Path(__file__).resolve().parent
@@ -21,6 +22,11 @@ STATIC = {
     "/app.css": ("web/app.css", "text/css; charset=utf-8"),
     "/app.js": ("web/app.js", "text/javascript; charset=utf-8"),
     "/images.js": ("web/images.js", "text/javascript; charset=utf-8"),
+    "/pipeline.js": ("web/pipeline.js", "text/javascript; charset=utf-8"),
+    "/pipeline-layout.js": ("web/pipeline-layout.js", "text/javascript; charset=utf-8"),
+    "/script-workbench.js": ("web/script-workbench.js", "text/javascript; charset=utf-8"),
+    "/script-ide.js": ("web/script-ide.js", "text/javascript; charset=utf-8"),
+    "/script-story.js": ("web/script-story.js", "text/javascript; charset=utf-8"),
     "/docs/media-prompt-guide.md": ("docs/media-prompt-guide.md", "text/plain; charset=utf-8"),
     "/docs/media-checklist.md": ("docs/media-checklist.md", "text/plain; charset=utf-8"),
     "/docs/media-variants.md": ("docs/media-variants.md", "text/plain; charset=utf-8"),
@@ -58,7 +64,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.local_request():
             self.respond_json(403, {"error": "请使用本地 Prisma 地址。"})
             return
-        path = urlsplit(self.path).path
+        url = urlsplit(self.path)
+        path = url.path
+        query = parse_qs(url.query)
         if path == '/mcp':
             self.mcp_no_stream()
             return
@@ -66,15 +74,19 @@ class Handler(BaseHTTPRequestHandler):
             self.get_export(path)
             return
         if path.startswith('/api/images/'):
-            self.get_image_resource(path)
+            self.get_image_resource(path, project=query.get('project_id', [None])[0])
             return
         if path.startswith('/api/workspace/assets/'):
             ident = path.removeprefix('/api/workspace/assets/')
             try:
                 resources = self.server.images.resources
                 metadata = resources.asset(ident)
-                self.send_file(resources.asset_path(metadata), 'application/octet-stream',
-                               attachment=f'prisma-asset{Path(metadata["name"]).suffix.lower()}')
+                suffix = Path(metadata['name']).suffix.lower()
+                audio = {'.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.mp3': 'audio/mpeg',
+                         '.wav': 'audio/wav', '.flac': 'audio/flac'}
+                mime = (IMAGE_TYPES.get(suffix) or audio.get(suffix)) if query.get('preview') == ['1'] else None
+                self.send_file(resources.asset_path(metadata), mime or 'application/octet-stream',
+                               attachment=None if mime else f'prisma-asset{suffix}')
             except (OSError, ValueError):
                 self.respond_json(404, {'error': '素材不存在或无法读取。'})
             return
@@ -118,12 +130,12 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError):
             self.respond_json(404, {'error': '导出文件不存在。'})
 
-    def get_image_resource(self, path: str) -> None:
+    def get_image_resource(self, path: str, *, project=None) -> None:
         toolkit = self.server.images
         route = [unquote(part) for part in path.split('/')[3:]]
         try:
             if route == ['catalog']:
-                self.respond_json(200, toolkit.catalog())
+                self.respond_json(200, toolkit.catalog(project))
             elif len(route) == 2 and route[0] == 'jobs':
                 self.respond_json(200, toolkit.jobs.get(route[1], details=True))
             elif len(route) == 2 and route[0] == 'source':
@@ -148,7 +160,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError):
             self.respond_json(404, {'error': '图像资源不存在或无法读取。'})
 
-    def send_file(self, path: Path, mime, *, attachment=None) -> None:
+    def send_file(self, path: Path, mime, *, attachment=None, export_id=None) -> None:
         with path.open('rb') as stream:
             self.send_response(200)
             self.send_header('Content-Type', mime)
@@ -157,6 +169,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('X-Content-Type-Options', 'nosniff')
             if attachment:
                 self.send_header('Content-Disposition', f'attachment; filename="{attachment}"')
+            if export_id:
+                self.send_header('X-Prisma-Export-Id', export_id)
             self.end_headers()
             shutil.copyfileobj(stream, self.wfile)
 
@@ -176,12 +190,32 @@ class Handler(BaseHTTPRequestHandler):
             '/api/images/replay': lambda data: self.server.images.replay(require_text(data, 'id')),
         }
         studio = self.server.mcp.workflow
+        pipeline = self.server.mcp.pipeline
+        editor = self.server.mcp.script_editor
+        projects = self.server.images.resources
         routes = {'/api/draft': studio.draft, '/api/scenes': inspect, '/api/scenario/anchor': studio.anchor,
+                  '/api/llm/status': studio.llm_status,
                   '/api/scenario/save': studio.save_documents,
+                  '/api/script/preview': studio.preview_script,
+                  '/api/script/bind': studio.bind_script,
+                  '/api/script/editor/open': editor.open, '/api/script/editor/save': editor.save,
+                  '/api/script/editor/asset': editor.prepare_asset,
+                  '/api/script/story': inspect_story, '/api/script/story/edit': editor.edit_story,
                   '/api/asset-prompt': studio.asset_prompt,
                   '/api/workspace/project/save': self.server.images.resources.save_project,
                   '/api/workspace/project/open': self.server.mcp.open_project,
+                  '/api/workspace/project/history': self.server.images.resources.project_history,
+                  '/api/workspace/project/undo': self.server.images.resources.undo_project,
+                  '/api/workspace/project/restore': self.server.images.resources.restore_project_revision,
+                  '/api/workspace/project/list': projects.list_projects,
+                  '/api/workspace/project/delete': lambda data: projects.set_project_trash(data, trash=True),
+                  '/api/workspace/project/restore-deleted': lambda data: projects.set_project_trash(data, trash=False),
+                  '/api/pipeline/state': pipeline.state, '/api/pipeline/inputs': pipeline.inputs,
+                  '/api/pipeline/approved': pipeline.approved,
+                  '/api/pipeline/reusable': pipeline.reusable,
+                  '/api/pipeline/action': pipeline.decide,
                   '/api/workspace/assets/import': self.server.images.import_workspace_asset,
+                  '/api/images/loras/prepare': self.server.images.prepare_lora,
                   '/api/images/library/list': self.server.images.library_list,
                   '/api/images/library/item': self.server.images.library_item,
                   '/api/images/library/refresh': self.server.images.refresh_library}
@@ -221,6 +255,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if not isinstance(data, dict):
                 raise ValueError("请求须为 JSON 对象。")
+            if data.get('project_id'):
+                projects.project_record(data['project_id'])
             if self.path in image_routes:
                 payload = image_routes[self.path](data)
                 self.respond_json(202 if 'state' in payload else 201, payload)
@@ -235,7 +271,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def build(self, data: dict) -> None:
         export = self.server.mcp.export(data)
-        self.send_file(Path(export['path']), 'application/zip', attachment='prisma-renpy.zip')
+        self.send_file(Path(export['path']), 'application/zip', attachment='prisma-renpy.zip', export_id=export['id'])
 
 
 def main() -> None:

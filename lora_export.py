@@ -42,7 +42,7 @@ def legacy_dataset(images, recipe):
 
 def write_dataset(archive, folder, manifest):
     prefix = f'datasets/{manifest["id"]}'
-    write_json(archive, f'{prefix}/dataset.json', manifest)
+    write_json(archive, f'{prefix}/dataset.json', {key: value for key, value in manifest.items() if key != 'project_id'})
     for item in manifest['items']:
         for name in (item['name'], Path(item['name']).with_suffix('.txt').name):
             archive.write(child_file(folder, name), f'{prefix}/images/{name}')
@@ -95,7 +95,9 @@ def export_archive(images, ids, target):
             entry.update(workspace_id=ident, dataset_id=job['options']['dataset'],
                          path=f'jobs/{job_id}/checkpoints/{path.name}')
         else:
-            entry.update(workspace_id=f'import:{path.stem}', path=f'loras/{path.name}')
+            prefix = '' if family == 'sd1' else f'{family}:'
+            folder = 'loras' if family == 'sd1' else f'loras/{family}'
+            entry.update(workspace_id=f'import:{prefix}{path.stem}', path=f'{folder}/{path.name}')
             branch = ident.split('-', 1)[0]
             if branch in recipes:
                 if branch not in datasets:
@@ -106,7 +108,6 @@ def export_archive(images, ids, target):
             if weights[key][1] != digest:
                 raise ValueError(f'导出包含同名的不同权重：{path.name}')
             entry['path'] = weights[key][2]
-            entry['workspace_id'] = f'import:{Path(entry["path"]).stem}'
         else:
             weights[key] = (path, digest, entry['path'])
         entries.append(entry)
@@ -124,7 +125,13 @@ def export_archive(images, ids, target):
                 for folder, manifest in datasets.values():
                     write_dataset(archive, folder, manifest)
                 for job_id, (job, selected) in jobs.items():
-                    write_json(archive, f'jobs/{job_id}/job.json', dict(job, checkpoints=selected, images=[]))
+                    options = {key: value for key, value in job['options'].items() if key != 'project_id'}
+                    exported = dict(job, options=options, checkpoints=selected, images=[])
+                    if isinstance((job.get('inputs') or {}).get('dataset'), dict):
+                        inputs = job['inputs'].copy()
+                        inputs['dataset'] = {key: value for key, value in inputs['dataset'].items() if key != 'project_id'}
+                        exported['inputs'] = inputs
+                    write_json(archive, f'jobs/{job_id}/job.json', exported)
                     directory = images.jobs.directory(job_id)
                     for name in ('runtime.json', 'dataset.toml'):
                         if (directory / name).is_file():
@@ -147,8 +154,9 @@ def save_export(images, data):
         counts = export_archive(images, data.get('loras'), stage / ARCHIVE_NAME)
         stage.rename(exports / ident)
     path = exports / ident / ARCHIVE_NAME
-    images.record_export(ident, path, 'lora',
-                         links=[('includes', 'lora', item) for item in data['loras']], metadata=counts)
+    links = [('includes', 'lora', item) for item in data['loras']]
+    links.extend(images.resources.ownership(data.get('project_id')))
+    images.record_export(ident, path, 'lora', links=links, metadata=counts)
     return dict(id=ident, path=str(path),
                 url=f'/api/exports/{ident}/{ARCHIVE_NAME}', **counts)
 

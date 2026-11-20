@@ -6,56 +6,433 @@
   <title>Prisma · 视觉小说工作台</title>
   <link rel="stylesheet" href="/app.css">
   <script src="/app.js" defer></script>
+  <script src="/pipeline-layout.js" defer></script>
+  <script src="/pipeline.js" defer></script>
   <script src="/images.js" defer></script>
+  <script src="/script-workbench.js" defer></script>
+  <script src="/script-story.js" defer></script>
+  <script src="/script-ide.js" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="/">Prisma</a>
-    <nav aria-label="制作文档">
-      <a href="#pipeline">制作信息流</a>
-      <a href="#image-studio">图像工作室</a>
-      <a href="#image-library">资源目录</a>
-      <a href="/docs/reproducible-workflow.md" target="_blank" rel="noopener">从零开始与 MCP</a>
-      <a href="/docs/media-prompt-guide.md" target="_blank" rel="noopener">素材 Prompt</a>
-      <a href="/docs/media-checklist.md" target="_blank" rel="noopener">素材清单</a>
-      <a href="/docs/media-variants.md" target="_blank" rel="noopener">差分规格</a>
-    </nav>
-  </header>
-
-  <main>
-    <div class="page-head">
-      <div>
-        <h1>视觉小说工作台</h1>
-        <p>按制作依赖查看信息从哪里来、交给谁；每个节点标明当前已接通或待接入。</p>
-      </div>
-      <button id="sample" type="button">载入车站样例</button>
-    </div>
-
-    <div id="status" class="status" role="status" aria-live="polite">可以从原文或已有的 Scenario 开始。</div>
-
-    <section class="panel" id="projects" aria-labelledby="project-title">
-      <h2 id="project-title">项目</h2>
-      <div class="studio-grid">
-        <label>项目名称<input id="project-name" maxlength="128" placeholder="新项目名称"></label>
-        <label>已保存项目<select id="project-select"><option value="">选择项目</option></select></label>
-        <div class="studio-actions studio-wide">
-          <button id="project-save" type="button">保存项目</button>
-          <button id="project-save-copy" type="button" disabled>另存为新项目</button>
-          <button id="project-open" type="button">打开所选项目</button>
+  <svg class="icon-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <symbol id="icon-prisma" viewBox="0 0 24 24"><path d="M12 2.5 21.5 12 12 21.5 2.5 12 12 2.5Z"/><path d="m7.4 12 4.6 4.6 4.6-4.6"/></symbol>
+      <symbol id="icon-library" viewBox="0 0 24 24"><rect x="3" y="4" width="4" height="16" rx="1"/><rect x="9" y="4" width="4" height="16" rx="1"/><path d="m16 5 4-1 3 15-4 1z"/></symbol>
+      <symbol id="icon-route" viewBox="0 0 24 24"><circle cx="5" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 5h9a3.5 3.5 0 0 1 0 7H8a3.5 3.5 0 0 0 0 7h9"/></symbol>
+      <symbol id="icon-document" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6"/></symbol>
+      <symbol id="icon-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8" cy="9" r="1.5"/><path d="m21 16-5-5-7 9"/></symbol>
+      <symbol id="icon-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5zM3 12l9 5 9-5M3 16l9 5 9-5"/></symbol>
+      <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+      <symbol id="icon-code" viewBox="0 0 24 24"><path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18"/></symbol>
+      <symbol id="icon-export" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 7h8m4 0h4M4 17h4m4 0h8"/><circle cx="14" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+      <symbol id="icon-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.2 9a2.8 2.8 0 1 1 4.4 2.3c-1 .7-1.6 1-1.6 2.2m0 3.5h.01"/></symbol>
+      <symbol id="icon-write" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8 12 3 3 5-6"/></symbol>
+      <symbol id="icon-undo" viewBox="0 0 24 24"><path d="m8 6-5 5 5 5m-5-5h12a5 5 0 0 1 0 10h-2"/></symbol>
+      <symbol id="icon-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2 7M3 5v6h6m3-4v5l3 2"/></symbol>
+      <symbol id="icon-add" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+      <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M12 16V4m-5 5 5-5 5 5M4 16v4h16v-4"/></symbol>
+      <symbol id="icon-forward" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
+      <symbol id="icon-display" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></symbol>
+      <symbol id="icon-message" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 1-8 8H5l1.1-3.5A8 8 0 1 1 20 11Z"/><path d="M9 11h6"/></symbol>
+      <symbol id="icon-spark" viewBox="0 0 24 24"><path d="M12 2v4m0 12v4M2 12h4m12 0h4m-5-5 2.5-2.5m-15 15L7 17m10 0 2.5 2.5m-15-15L7 7"/><circle cx="12" cy="12" r="3"/></symbol>
+      <symbol id="icon-play" viewBox="0 0 24 24"><path d="m9 5 11 7-11 7z"/></symbol>
+      <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+    </defs>
+  </svg>
+  <div class="workspace">
+    <header class="app-titlebar">
+      <a class="brand" href="#projects"><span class="brand-mark"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-prisma"></use></svg></span>Prisma</a>
+      <a class="scope-block" href="#projects" id="project-scope" hidden>
+        <svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder"></use></svg><strong id="project-current">未打开项目</strong>
+      </a>
+      <a class="titlebar-help" href="/docs/resource-library.md" target="_blank" rel="noopener"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-help"></use></svg><span>使用说明</span></a>
+    </header>
+    <aside class="workspace-sidebar" aria-label="工作区导航">
+      <nav class="workspace-nav" aria-label="工作区">
+        <div class="nav-group">
+          <a href="#project-manager"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-library"></use></svg><span>项目库</span></a>
         </div>
-      </div>
-    </section>
+        <div id="project-nav" class="nav-group project-nav" role="group" aria-labelledby="nav-project-workspace" hidden>
+          <span class="nav-label" id="nav-project-workspace">制作</span>
+          <a href="#projects"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-route"></use></svg><span>项目总览</span></a>
+          <a href="#stage-scenario"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-document"></use></svg><span>剧本</span></a>
+          <a href="#stage-generation"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-image"></use></svg><span>图像生成</span></a>
+          <a href="#stage-train"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-layers"></use></svg><span>LoRA 训练</span></a>
+          <a href="#stage-assets"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder"></use></svg><span>项目素材</span></a>
+          <a href="#approved-assets"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-write"></use></svg><span>已通过资产</span></a>
+          <a href="#stage-cues"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-code"></use></svg><span>演出绑定</span></a>
+          <a href="#stage-script"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-document"></use></svg><span>脚本 IDE</span></a>
+          <a href="#stage-export"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-export"></use></svg><span>工程导出</span></a>
+          <a href="#project-config"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-settings"></use></svg><span>项目配置</span></a>
+        </div>
+      </nav>
+    </aside>
+    <main class="workspace-main" aria-labelledby="workspace-title">
+      <header class="workspace-toolbar">
+        <div class="workspace-heading">
+          <h1 id="workspace-title">项目库</h1>
+          <div class="studio-actions workspace-actions">
+            <a id="workspace-map-link" class="toolbar-link" href="#pipeline" hidden><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-route"></use></svg><span>路线图</span></a>
+            <span id="project-write-state" class="project-write-state" aria-live="polite"></span>
+            <button id="project-write" type="button" hidden disabled><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-write"></use></svg><span>写入</span></button>
+            <button id="project-undo" type="button" hidden disabled><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-undo"></use></svg><span>撤回</span></button>
+            <button id="project-history-open" type="button" hidden><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-history"></use></svg><span>历史记录</span></button>
+          </div>
+        </div>
+      </header>
+      <div id="workspace-content" class="workspace-content">
+      <section id="projects" class="workspace-view" data-workspace-view="项目总览" hidden>
+        <section id="pipeline" class="pipeline panel" aria-labelledby="pipeline-title">
+          <div class="pipeline-heading">
+            <div>
+              <h2 id="pipeline-title">项目制作路线图</h2>
+              <p>打开任一节点查看直接上下游。通过后，当前结果会传给所有直接下游。</p>
+            </div>
+            <a id="flow-start" class="section-link" href="#pipeline-stage" hidden>查看起点</a>
+          </div>
 
-    <details id="image-library" class="panel image-toolkit">
-        <summary>资源目录</summary>
+          <div class="flow-workbench">
+          <div class="flow-canvas">
+          <div class="flow-graph-scroll" tabindex="0" role="region" aria-label="制作管线拓扑，可拖动或滚动查看全部节点">
+            <div class="flow-graph">
+              <svg class="flow-edges" aria-hidden="true">
+                <defs>
+                  <marker id="flow-arrow-live" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path fill="#126456" d="M0 0 L10 5 L0 10 Z" /></marker>
+                  <marker id="flow-arrow-plan" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path fill="#86948e" d="M0 0 L10 5 L0 10 Z" /></marker>
+                </defs>
+              </svg>
+
+            </div>
+          </div>
+          <div class="flow-legend" aria-label="路线图图例">
+            <span class="legend-unfinished">未完成</span><span class="legend-working">进行中</span>
+            <span class="legend-completed">已完成</span><span class="legend-skipped">已跳过</span>
+            <div id="flow-neighborhood-legend" class="flow-neighborhood-legend" hidden>
+              <span class="legend-upstream">直接上游</span><span class="legend-downstream">直接下游</span>
+              <span id="flow-neighborhood-both" class="legend-both" hidden>双向依赖</span>
+            </div>
+            <small class="flow-pan-hint">按住鼠标左键拖动画布</small>
+          </div>
+          </div>
+          </div>
+
+          <details class="flow-ledger">
+            <summary>产物与分支状态（展开查看）</summary>
+          <div class="flow-table-wrap" tabindex="0" aria-label="制作分支的来源、节点产物和下游去向">
+            <table class="pipeline-table">
+              <thead><tr><th scope="col">支线 / 节点</th><th scope="col">直接上游</th><th scope="col">本节点产物</th><th scope="col">直接下游</th></tr></thead>
+              <tbody id="flow-ledger-body"></tbody>
+            </table>
+          </div>
+          </details>
+
+          <div class="active-route" aria-label="工作区快捷入口" hidden>
+            <div class="active-route-heading"><strong>常用工作区</strong></div>
+            <div class="active-route-steps" id="flow-shortcuts"></div>
+          </div>
+
+        </section>
+      </section>
+      <section id="pipeline-stage" class="workspace-view node-workspace" data-workspace-view="节点工作台" hidden tabindex="-1" aria-labelledby="flow-detail-title">
+        <header class="node-heading panel">
+          <div>
+            <h2><span id="flow-detail-title">节点工作台</span><b id="stage-node-state" class="stage-status"></b></h2>
+            <p class="stage-workspace-state" id="flow-detail-state"></p>
+          </div>
+          <a class="toolbar-link" href="#projects">返回路线图</a>
+        </header>
+        <p id="stage-load-status" class="hint" role="status">正在读取节点…</p>
+        <div id="stage-controls" class="node-workspace-content" hidden>
+          <section class="node-context panel" aria-label="节点直接上下游">
+            <div class="node-flow-copy">
+              <h3>直接上下游</h3>
+              <p id="flow-detail-input" class="hint"></p>
+            </div>
+            <div class="node-neighborhood-scroll flow-graph-scroll" role="region" aria-label="此节点的直接上下游">
+              <div id="stage-neighborhood" class="stage-neighborhood flow-graph has-neighborhood" role="group"></div>
+            </div>
+          </section>
+          <section class="node-tools" aria-label="节点工具和参数">
+            <h3 class="node-section-title">工具与参数</h3>
+            <div id="stage-tools" class="node-tool-panels"></div>
+            <p id="stage-manual" class="panel" hidden>此节点使用手动制作。可以在成果区填写内容或选用已有产物。</p>
+          </section>
+          <section class="panel node-output" aria-labelledby="stage-output-heading">
+            <h3 id="stage-output-heading">本节点成果</h3>
+            <p id="flow-detail-output" class="hint"></p>
+            <p id="stage-next-step" class="hint"></p>
+            <div id="stage-version" class="stage-version" hidden></div>
+            <div id="stage-updated-output"></div>
+            <div id="stage-resource-preview" class="stage-version" hidden></div>
+            <details id="stage-compose" class="stage-compose">
+              <summary>选用已有产物或补充成果</summary>
+              <div class="stage-form">
+                <label class="studio-field">已有产物<select id="stage-resource"><option value="">选择资源</option></select></label>
+                <label class="studio-field">查找资源<input type="search" id="stage-resource-query" maxlength="200" placeholder="资源名称或 ID"></label>
+                <p id="stage-resource-status" class="hint" role="status"></p>
+                <div class="studio-actions">
+                  <button id="stage-view-resource" type="button" disabled>预览所选产物</button>
+                  <button id="stage-use-lora" type="button" hidden>用于本地生成</button>
+                </div>
+                <label class="studio-field">内容或说明<textarea id="stage-content" maxlength="12000" rows="4"></textarea></label>
+              </div>
+            </details>
+          </section>
+          <footer class="node-actionbar">
+            <p id="stage-message" class="hint" role="status" hidden></p>
+            <div class="studio-actions node-actions" aria-label="节点操作">
+              <button id="stage-retry" type="button">重试</button>
+              <button id="stage-pass" class="primary" type="button">通过</button>
+            </div>
+          </footer>
+        </div>
+      </section>
+      <section id="project-manager" class="workspace-view" data-workspace-view="项目库" aria-label="项目管理" hidden>
+        <div class="project-panel-heading">
+          <div class="project-library-title"><h2 id="project-library-title">全部项目</h2><span id="project-count" class="project-count">读取中</span></div>
+          <div class="studio-actions">
+            <button id="project-trash-toggle" type="button" aria-pressed="false">回收站</button>
+            <button id="project-create-open" class="primary" type="button"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-add"></use></svg>新建项目</button>
+          </div>
+        </div>
+        <div id="project-empty" class="project-empty">
+          <span class="project-empty-icon"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-library"></use></svg></span>
+          <strong id="project-empty-title" aria-live="polite">正在读取项目…</strong>
+          <p id="project-empty-detail" hidden>新建空白项目，或导入 TXT、Markdown 开始制作。</p>
+        </div>
+        <div id="project-list" class="project-grid" aria-label="已保存项目" hidden></div>
+        <div id="project-pages" class="studio-actions" aria-label="项目分页" hidden>
+          <button id="project-prev" type="button">上一页</button>
+          <button id="project-next" type="button">下一页</button>
+        </div>
+        <dialog id="project-create-dialog" class="project-create-dialog" aria-labelledby="project-create-title">
+          <section class="panel project-create-panel">
+            <div class="project-dialog-heading"><h2 id="project-create-title">新建项目</h2><button id="project-create-cancel" class="icon-button" type="button" aria-label="关闭"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-close"></use></svg></button></div>
+            <p class="project-create-intro">从空白项目开始，或直接导入原文建立制作空间。</p>
+            <form id="project-create">
+              <label class="studio-field">项目名称<input id="project-new-name" maxlength="128" required autocomplete="off" placeholder="例如：夏日回声"></label>
+              <label class="file-button project-source-import"><span class="import-icon"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-upload"></use></svg></span><span><strong>选择原文文件</strong><small>TXT 或 Markdown，可稍后再添加</small></span><input id="project-raw-file" type="file" accept=".txt,.md,text/plain" aria-label="新建项目时导入原文"></label>
+              <p id="project-raw-file-name" class="hint project-file-name">暂未选择文件</p>
+              <div class="studio-actions section-actions">
+                <button id="project-new" class="primary" type="submit">创建工作区</button>
+                <button id="project-keep" type="button" hidden>从当前内容创建</button>
+                <button id="project-create-cancel-secondary" type="button">取消</button>
+              </div>
+            </form>
+          </section>
+        </dialog>
+      </section>
+      <section id="project-config" class="workspace-view" data-project-view data-workspace-view="项目配置" hidden>
+        <nav class="config-nav" aria-label="项目配置分组">
+          <a href="#settings-identity"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-display"></use></svg><span>项目与输出</span></a>
+          <a href="#settings-llm"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-message"></use></svg><span>文本模型</span></a>
+          <a href="#settings-generation"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-image"></use></svg><span>图像模型</span></a>
+          <a href="#settings-training"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-layers"></use></svg><span>训练模型</span></a>
+          <a href="#settings-prompts"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-spark"></use></svg><span>提示词</span></a>
+          <a href="#settings-management"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-settings"></use></svg><span>管理</span></a>
+        </nav>
+        <div class="work-grid project-config-grid">
+          <section class="panel" id="settings-identity">
+            <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-display"></use></svg>项目与 Ren’Py 输出</h2>
+            <div class="settings-project-fields">
+              <label class="studio-field">项目名称<input id="project-name" maxlength="128" autocomplete="off"></label>
+              <div class="resolution-fields">
+                <label class="studio-field">画面宽度<input id="project-width" type="number" min="640" max="7680" step="1" value="1280"></label>
+                <span class="resolution-times" aria-hidden="true">×</span>
+                <label class="studio-field">画面高度<input id="project-height" type="number" min="360" max="4320" step="1" value="720"></label>
+              </div>
+              <label class="studio-field">默认字体<select id="font"><option value="">Ren’Py 默认</option></select></label>
+            </div>
+            <p class="hint">画面尺寸会写入 Ren’Py 配置，并用于背景铺满和立绘布局。</p>
+            <p id="project-config-error" class="hint error-text" role="alert" hidden></p>
+          </section>
+          <section class="panel project-config-wide" id="settings-llm">
+            <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-message"></use></svg>文本模型 · 项目全局 LLM</h2>
+            <p class="hint">这是项目的文本模型默认配置。所有 LLM 调用默认继承此处设置；只有启用任务级 Override 才会单独使用另一套配置。规则解析不调用模型。API 密钥由服务端环境变量读取，不存入项目。</p>
+            <div class="studio-grid project-config-fields">
+              <label>处理方式<select id="config-llm-mode"><option value="rules">规则解析（本地）</option><option value="openai-compatible">OpenAI 兼容 LLM</option></select></label>
+              <label>API 地址<input id="config-llm-url" type="url" maxlength="512" value="https://api.openai.com/v1" placeholder="https://api.openai.com/v1"></label>
+              <label>模型名称<input id="config-llm-model" maxlength="160" value="gpt-4o-mini" placeholder="gpt-4o-mini"></label>
+              <label>Temperature<input id="config-llm-temperature" type="number" min="0" max="2" step="0.05" value="0.2"></label>
+              <label>最大输出 Token<input id="config-llm-tokens" type="number" min="128" max="32768" step="128" value="4096"></label>
+              <label>请求超时（秒）<input id="config-llm-timeout" type="number" min="30" max="600" step="10" value="180"></label>
+            </div>
+            <label class="studio-field project-config-wide-field">系统提示词<textarea id="config-llm-system" maxlength="6000">Convert the supplied novel text into Prisma Scenario JSON version 1. Return only one JSON object with version and chapters. Each chapter has id, title, scenes; each scene has id and lines; each line has text, speaker (string or null), and source {"kind":"raw","line":N} when traceable to an input line. Preserve the original language, wording, chapter and scene order. Do not summarize, rewrite, invent, omit, or merge distinct utterances. Use the supplied speaker map for quoted dialogue; use speaker "？" for unmapped quoted dialogue and null for narration. Keep valid sequential chapter IDs and scene IDs such as 1 and 1:1. Optional line fields are viewpoint and direction. Do not output Markdown fences.</textarea></label>
+            <p id="config-llm-key-state" class="project-config-key-state" role="status">正在读取服务端密钥状态…</p>
+            <details id="config-llm-scenario-override" class="llm-override">
+              <summary>Scenario 生成 · Override</summary>
+              <p class="hint">关闭时实时继承上方的项目全局 LLM。启用后，Scenario 生成独立使用下方设置。</p>
+              <label class="llm-override-toggle"><input id="config-llm-scenario-enabled" type="checkbox">为 Scenario 单独 Override 项目全局 LLM</label>
+              <div id="config-llm-scenario-fields" class="studio-grid project-config-fields llm-override-fields" hidden>
+                <label>处理方式<select id="config-llm-scenario-mode"><option value="rules">规则解析（本地）</option><option value="openai-compatible">OpenAI 兼容 LLM</option></select></label>
+                <label>API 地址<input id="config-llm-scenario-url" type="url" maxlength="512" placeholder="https://api.openai.com/v1"></label>
+                <label>模型名称<input id="config-llm-scenario-model" maxlength="160" placeholder="gpt-4o-mini"></label>
+                <label>Temperature<input id="config-llm-scenario-temperature" type="number" min="0" max="2" step="0.05"></label>
+                <label>最大输出 Token<input id="config-llm-scenario-tokens" type="number" min="128" max="32768" step="128"></label>
+                <label>请求超时（秒）<input id="config-llm-scenario-timeout" type="number" min="30" max="600" step="10"></label>
+                <label class="studio-field project-config-wide-field">系统提示词<textarea id="config-llm-scenario-system" maxlength="6000"></textarea></label>
+              </div>
+            </details>
+          </section>
+          <section class="panel project-config-wide" id="settings-generation">
+            <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-image"></use></svg>图像模型与生成默认值</h2>
+            <div class="studio-grid project-config-fields">
+              <label>默认模式<select id="config-image-mode"><option value="local">本地模型</option><option value="online">在线模型</option></select></label>
+              <label>本地底模<select id="config-image-base"><option value="">自动选择已安装底模</option><option value="sd1">Anything V3 · SD 1.x</option><option value="sdxl">Animagine XL 4.0</option><option value="anima">Anima Base</option></select></label>
+              <label>默认 LoRA<select id="config-image-lora"><option value="">底模</option></select></label>
+              <label>对照 LoRA<select id="config-image-compare"><option value="none">关闭对照</option><option value="">底模</option></select></label>
+              <label>LoRA 权重<input id="config-image-weight" type="number" min="0.05" max="1.5" step="0.01" value="0.35"></label>
+              <label>本地分辨率<select id="config-image-size"><option value="512x896">512 × 896 · 立绘</option><option value="832x1216">832 × 1216 · 高立绘</option><option value="896x512">896 × 512 · 横图</option><option value="512x512">512 × 512 · 方图</option><option value="768x768">768 × 768 · 方图</option><option value="1024x1024">1024 × 1024 · 高质量方图</option></select></label>
+              <label>采样器<select id="config-image-sampler"><option value="euler_a">Euler a</option><option value="euler">Euler</option><option value="dpm++2m">DPM++ 2M</option><option value="er_sde">Anima ER SDE</option></select></label>
+              <label>采样步数<input id="config-image-steps" type="number" min="1" max="60" value="20"></label>
+              <label>CFG<input id="config-image-cfg" type="number" min="1" max="15" step="0.1" value="6.5"></label>
+              <label>默认 Seed<input id="config-image-seed" type="number" min="0" max="2147483644" placeholder="留空则随机"></label>
+              <label>候选张数<input id="config-image-count" type="number" min="1" max="4" value="1"></label>
+              <label>在线模型<select id="config-image-online-model"><option value="">使用服务默认模型</option></select></label>
+              <label>在线尺寸<select id="config-image-online-size"><option value="1024x1536">1024 × 1536 · 竖图</option><option value="1536x1024">1536 × 1024 · 横图</option><option value="1024x1024">1024 × 1024 · 方图</option></select></label>
+              <label>在线质量<select id="config-image-quality"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+            </div>
+            <label class="studio-field project-config-wide-field">默认负面提示词<textarea id="config-image-negative" maxlength="4000">worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, chromatic aberration, bad anatomy, extra limbs, text, watermark</textarea></label>
+          </section>
+          <section class="panel project-config-wide" id="settings-training">
+            <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-layers"></use></svg>训练底模与 LoRA 默认值</h2>
+            <div class="studio-grid project-config-fields">
+              <label>训练底模<select id="config-train-base"><option value="">自动选择已安装底模</option><option value="sd1">Anything V3 · SD 1.x</option><option value="sdxl">Animagine XL 4.0 · SDXL</option><option value="iris3b">Iris-3B</option><option value="anima">Anima Base</option></select></label>
+              <label>默认数据集<select id="config-train-dataset"><option value="">每次手动选择</option></select></label>
+              <label>续训 LoRA<select id="config-train-parent"><option value="">从头训练</option></select></label>
+              <label>默认输出名<input id="config-train-name" maxlength="48" value="prisma_style_next" pattern="[A-Za-z0-9][A-Za-z0-9_\-]{0,47}"></label>
+              <label>训练步数<input id="config-train-steps" type="number" min="1" max="5000" value="200"></label>
+              <label>保存间隔<input id="config-train-save" type="number" min="1" max="5000" value="100"></label>
+              <label>Rank<input id="config-train-rank" type="number" min="2" max="64" value="4"></label>
+              <label>学习率<input id="config-train-lr" type="number" min="0.000001" max="0.001" step="0.000001" value="0.0001"></label>
+              <label>每张重复次数<input id="config-train-repeats" type="number" min="1" max="50" value="10"></label>
+              <label>训练 Seed<input id="config-train-seed" type="number" min="0" max="2147483647" value="1065270805"></label>
+            </div>
+          </section>
+          <section class="panel project-config-wide" id="settings-prompts">
+            <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-spark"></use></svg>资产提示词默认风格</h2>
+            <div class="studio-grid">
+              <label class="studio-wide">追加到提示词的风格描述<textarea id="config-prompt-style" maxlength="2000">Japanese anime visual novel illustration, clean linework, vivid colors, crisp flat cel shading</textarea></label>
+              <label class="studio-wide">默认负面提示词<textarea id="config-prompt-negative" maxlength="2000">text, watermark, frame</textarea></label>
+            </div>
+          </section>
+          <section class="panel project-config-wide project-management-actions" id="settings-management">
+            <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-settings"></use></svg>项目管理</h2>
+            <p class="hint">另存为新项目会复制当前内容并保留独立版本链。</p>
+            <div class="studio-actions">
+              <button id="project-save-copy" type="button" disabled><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-copy"></use></svg>另存为新项目</button>
+              <button id="project-close" type="button" disabled><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-close"></use></svg>关闭项目</button>
+            </div>
+          </section>
+        </div>
+      </section>
+      <section id="script-editor" class="workspace-view" data-project-view data-workspace-view="剧本与 Scenario" hidden>
+        <div class="work-grid script-sources"><section id="scenario-panel" class="panel" aria-labelledby="scenario-title">
+        <div class="panel-head">
+          <h2 id="scenario-title"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-document"></use></svg>剧本文件</h2>
+          <label class="file-button">导入剧本<input id="scenario-file" type="file" accept=".json,.md,.txt,application/json,text/plain" aria-label="导入 Scenario"></label>
+          <button id="save-scenario" type="button">下载 JSON</button>
+        </div>
+        <input id="scenario" type="hidden">
+        <p class="hint">支持导入 Scenario JSON 和旧版 Markdown。</p>
+        <div class="panel-foot">
+          <span id="scene-summary">等待剧本</span>
+          <button id="anchor-scenario" type="button" title="按当前编号转换旧演出绑定">固定演出位置</button>
+        </div>
+      </section>
+<details id="raw-panel" class="panel" aria-labelledby="raw-title">
+        <summary>原文与导入</summary>
+        <div class="panel-head">
+          <h2 id="raw-title"><label for="raw">原文</label></h2>
+          <label class="file-button">导入 TXT<input id="raw-file" type="file" accept=".txt,.md,text/plain" aria-label="导入原文"></label>
+          <label class="file-button">追加 TXT<input id="raw-append-file" type="file" accept=".txt,.md,text/plain" aria-label="追加原文到当前项目"></label>
+          <button id="sample" type="button">载入样例</button>
+        </div>
+        <textarea aria-label="原文" id="raw" spellcheck="false" placeholder="粘贴小说文本，或导入 UTF-8 文件。"></textarea>
+        <p class="hint raw-append-hint">追加会保留已有原文并自动写入历史；已有 Scenario 不会自动改变。</p>
+        <div id="scenario-draft-controls">
+        <div class="panel-foot">
+          <label for="heading">起始章节</label>
+          <input id="heading" type="text" placeholder="# 序章（可选）">
+          <button id="draft" class="primary" type="button"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-spark"></use></svg>生成 Scenario</button>
+        </div>
+        <details>
+          <summary>说话人映射</summary>
+          <label for="speakers">按原文行号填写 JSON，未指定的对白标为「？：」。</label>
+          <textarea id="speakers" class="code compact" spellcheck="false" placeholder='{"6": "林岚", "7": "周明"}'></textarea>
+        </details>
+        </div>
+      </details></div>
+        <section id="scene-panel" class="panel" aria-labelledby="scene-title">
+        <div class="panel-head">
+          <h2 id="scene-title"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-message"></use></svg>场景与台词</h2>
+          <select id="scene" aria-label="选择场景" disabled><option>暂无场景</option></select>
+        </div>
+        <p id="scene-empty" class="hint">从原文生成、导入剧本，或新增章节。</p>
+        <div id="lines" class="lines" aria-label="场景台词"></div>
+        <div class="studio-actions scenario-actions">
+          <button id="add-scenario-line" type="button" disabled>新增文本</button>
+          <button id="add-scenario-scene" type="button" disabled>新增场景</button>
+          <button id="add-scenario-chapter" type="button">新增章节</button>
+        </div>
+        <form id="scenario-line-form" class="studio-grid scenario-editor" hidden>
+          <label>章节标题<input id="scenario-chapter-title" required></label>
+          <label>说话人<input id="scenario-speaker" placeholder="留空为旁白"></label>
+          <label class="studio-wide">文本<textarea id="scenario-line-text" rows="4" required></textarea></label>
+          <label>视角<input id="scenario-viewpoint"></label>
+          <label>动作或语气<input id="scenario-direction"></label>
+          <output id="scenario-source" class="hint studio-wide"></output>
+          <div class="studio-actions studio-wide">
+            <button type="submit" class="primary">应用修改</button>
+            <button id="open-line-production" type="button" hidden>为此句安排演出</button>
+            <button id="scenario-line-up" type="button">上移</button>
+            <button id="scenario-line-down" type="button">下移</button>
+            <button id="scenario-line-delete" type="button">删除</button>
+          </div>
+        </form>
+      </section>
+      </section>
+      <section id="approved-assets" class="workspace-view" data-project-view data-workspace-view="已通过资产" hidden>
+        <div class="approved-toolbar" role="search" aria-label="筛选已通过资产">
+          <label>搜索<input id="approved-query" type="search" placeholder="节点、文件名或资源 ID"></label>
+          <label>来源节点<select id="approved-filter"><option value="">全部节点</option></select></label>
+          <button id="approved-refresh" type="button">刷新</button>
+          <p id="approved-status" class="hint" role="status"></p>
+        </div>
+        <div class="approved-layout">
+          <section class="panel approved-index" aria-labelledby="approved-list-title">
+            <h2 id="approved-list-title">节点成果</h2>
+            <ul id="approved-list"></ul>
+            <p id="approved-empty" class="hint" hidden></p>
+          </section>
+          <section id="approved-detail" class="panel approved-detail" aria-label="资产详情" hidden></section>
+        </div>
+      </section>
+
+      <section id="assets" class="workspace-view" data-project-view data-workspace-view="项目素材" hidden>
+        <section class="panel" id="asset-panel">
+          <div class="panel-head"><h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder"></use></svg>已加入项目的素材</h2><label class="file-button">添加素材<input id="files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.ogg,.opus,.mp3,.wav,.flac,.ttf,.otf,.ttc" aria-label="添加素材文件"></label></div>
+          <div class="work-grid asset-workspace">
+            <div id="file-list" class="files">可添加图片、音频和字体。素材文件按名称引用。</div>
+            <div id="asset-preview" class="asset-preview" aria-live="polite"></div>
+          </div>
+        </section>
+        <div id="image-library" class="panel resource-panel">
+        <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-library"></use></svg>资源目录</h2>
         <form id="image-library-search" class="studio-grid">
+          <label>范围<select id="image-library-scope">
+            <option value="current" disabled>当前项目</option><option value="shared" selected>共享库</option>
+          </select></label>
           <label>类别<select id="image-library-kind">
             <option value="">全部</option><option value="project">项目</option><option value="revision">项目版本</option>
-            <option value="source">原文</option><option value="scenario">Scenario</option><option value="cues">演出绑定</option>
+            <option value="source">原文</option><option value="scenario">Scenario</option><option value="cues">演出绑定</option><option value="script">脚本</option>
             <option value="prompt">提示词</option><option value="asset">媒体素材</option><option value="tool">工具</option>
             <option value="model">模型</option><option value="lora">LoRA</option>
             <option value="dataset">数据集</option><option value="job">任务</option>
             <option value="artifact">产物</option><option value="export">导出</option>
+          <option value="pipeline">项目流程状态</option><option value="node-version">节点版本</option><option value="handoff">历史节点版本</option>
           </select></label>
           <label>搜索<input id="image-library-query" type="search" maxlength="200" placeholder="名称、ID 或任务参数"></label>
           <div class="studio-actions studio-wide">
@@ -70,231 +447,95 @@
         </div>
         <ul id="image-library-rows" class="library-rows"></ul>
         <section id="image-library-detail" class="image-card" aria-label="资源详情" hidden></section>
-      </details>
-
-    <section id="pipeline" class="pipeline panel" aria-labelledby="pipeline-title">
-      <div class="pipeline-heading">
-        <div>
-          <p class="eyebrow">PROJECT DATA FLOW</p>
-          <h2 id="pipeline-title">制作信息流</h2>
-          <p>看每个产物从哪里取得信息、交给哪个下游。绿色为当前已接通，琥珀色为部分接通，灰色为管线规划。</p>
-        </div>
-        <a class="section-link" href="#raw-panel">从原文开始 ↓</a>
       </div>
-
-      <div class="flow-graph-scroll" tabindex="0" aria-label="制作管线拓扑，可横向滚动查看全部节点">
-        <div class="flow-graph">
-          <svg class="flow-edges" viewBox="0 0 1600 760" preserveAspectRatio="none" aria-hidden="true">
-            <defs>
-              <marker id="flow-arrow-live" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path fill="#4b8058" d="M0 0 L8 4 L0 8 Z" /></marker>
-              <marker id="flow-arrow-partial" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path fill="#bd8b33" d="M0 0 L8 4 L0 8 Z" /></marker>
-              <marker id="flow-arrow-plan" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path fill="#9da59c" d="M0 0 L8 4 L0 8 Z" /></marker>
-              <marker id="flow-arrow-reference" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path fill="#7189a1" d="M0 0 L8 4 L0 8 Z" /></marker>
-            </defs>
-            <path class="pipeline-edge edge-live" data-from="raw" data-to="scenario" d="M200 362 L260 362" />
-            <path class="pipeline-edge edge-live" data-from="scenario" data-to="script" d="M440 330 C465 330 465 16 520 16 L1320 16 C1360 16 1360 338 1380 350" />
-            <path class="pipeline-edge edge-plan" data-from="scenario" data-to="chapter-brief" d="M440 342 C475 342 480 116 520 116" />
-            <path class="pipeline-edge edge-plan" data-from="scenario" data-to="content-overview" d="M440 362 C475 362 480 270 520 270" />
-            <path class="pipeline-edge edge-plan" data-from="scenario" data-to="character-overview" d="M440 382 C475 382 480 435 520 435" />
-            <path class="pipeline-edge edge-plan" data-from="content-overview" data-to="music-assets" d="M700 270 C760 270 760 170 820 170" />
-            <path class="pipeline-edge edge-partial" data-from="content-overview" data-to="background-assets" d="M700 270 C760 270 760 285 820 285" />
-            <path class="pipeline-edge edge-plan" data-from="character-overview" data-to="portrait-baseline" d="M700 435 C760 435 760 400 820 400" />
-            <path class="pipeline-edge edge-plan" data-from="character-overview" data-to="voice-baseline" d="M700 435 C760 435 760 545 820 545" />
-            <path class="pipeline-edge edge-reference" data-from="music-reference" data-to="music-assets" d="M910 115 L910 135" />
-            <path class="pipeline-edge edge-reference" data-from="character-reference" data-to="portrait-baseline" d="M700 625 C765 625 760 420 820 400" />
-            <path class="pipeline-edge edge-reference" data-from="voice-reference" data-to="voice-baseline" d="M910 630 L910 580" />
-            <path class="pipeline-edge edge-plan" data-from="portrait-baseline" data-to="sprite-assets" d="M1000 400 C1035 400 1040 360 1080 360" />
-            <path class="pipeline-edge edge-plan" data-from="portrait-baseline" data-to="cg-assets" d="M1000 415 C1035 415 1040 465 1080 465" />
-            <path class="pipeline-edge edge-plan" data-from="voice-baseline" data-to="voice-assets" d="M1000 545 C1035 545 1040 590 1080 590" />
-            <path class="pipeline-edge edge-partial" data-from="scenario" data-to="voice-assets" d="M350 400 L350 735 L1140 735 L1140 625" />
-            <path class="pipeline-edge edge-plan" data-from="music-assets" data-to="script" d="M1000 170 C1135 170 1260 170 1300 170 L1300 350 L1380 350" />
-            <path class="pipeline-edge edge-partial" data-from="background-assets" data-to="script" d="M1000 285 L1320 285 L1320 360 L1380 360" />
-            <path class="pipeline-edge edge-partial" data-from="sprite-assets" data-to="script" d="M1260 360 L1380 360" />
-            <path class="pipeline-edge edge-partial" data-from="cg-assets" data-to="script" d="M1260 465 C1320 465 1320 372 1380 372" />
-            <path class="pipeline-edge edge-partial" data-from="voice-assets" data-to="script" d="M1260 590 C1335 590 1335 384 1380 384" />
-          </svg>
-
-          <button class="flow-node graph-node graph-node--raw is-live" type="button" data-node="raw" data-title="Raw Text" data-input="作者导入的原文、起始章节和说话人映射。" data-handoff="原文段落、章节标题、说话人线索。" data-output="交给 Scenario 草稿器，生成可校对的剧本结构。" data-target="#raw-panel"><span class="node-title">Raw Text <b class="node-state" data-flow-id="flow-raw-state">等待原文</b></span><span class="node-value" data-flow-id="flow-raw-value">原文正文 · 章节起点 · 说话人映射</span></button>
-          <button class="flow-node graph-node graph-node--scenario is-live" type="button" data-node="scenario" data-title="Scenario" data-input="Raw Text、起始章节和说话人映射；也可以直接导入或编辑 Scenario。" data-handoff="章节、场景 ID、台词顺序、说话人和每句的触发位置。" data-output="分送梗概、内容与角色概览；台词与演出绑定进入 Script。" data-target="#scenario-panel"><span class="node-title">Scenario <b class="node-state" data-flow-id="flow-scenario-state">等待生成</b></span><span class="node-value" data-flow-id="flow-scenario-value">章节 → 场景 ID → 有序台词</span></button>
-          <button class="flow-node graph-node graph-node--script is-live" type="button" data-node="script" data-title="Scripts / Ren’Py" data-input="Scenario、按场景/台词位置编排的演出 cues，以及被引用的媒体文件。" data-handoff="背景、立绘、CG、音乐、音效、配音和触发位置。" data-output="生成 Ren’Py 脚本并打包实际引用文件。" data-target="#cue-panel"><span class="node-title">Scripts / Ren’Py <b class="node-state" data-flow-id="flow-script-state">等待解析</b></span><span class="node-value" data-flow-id="flow-script-value">Scenario + cues + 素材引用</span></button>
-
-          <button class="flow-node graph-node graph-node--chapter-brief is-plan" type="button" data-node="chapter-brief" data-title="章节梗概" data-input="Scenario 中该章节的场景与台词。" data-handoff="章节事件、人物变化、前后承接关系。" data-output="作者审阅；确认后作为分支上下文。"><span class="node-title">章节梗概 <b class="node-state">规划中</b></span><span class="node-value">按章提取 · 作者审阅</span></button>
-          <button class="flow-node graph-node graph-node--content-overview is-plan" type="button" data-node="content-overview" data-title="内容总览" data-input="全篇 Scenario。" data-handoff="时空范围、地点、世界观、氛围与音乐基调。" data-output="向背景与音乐资产提供上下文。"><span class="node-title">内容总览 <b class="node-state">规划中</b></span><span class="node-value">全文场景与情节脉络</span></button>
-          <button class="flow-node graph-node graph-node--character-overview is-plan" type="button" data-node="character-overview" data-title="角色概览" data-input="Scenario 中人物的行动、对白、称谓与关系。" data-handoff="统一角色 ID、性格、关系、外观和声音线索。" data-output="与角色参考及人声参考合并，形成视觉/声音基准。"><span class="node-title">角色概览 <b class="node-state">规划中</b></span><span class="node-value">角色 ID · 性格 · 关系 · 描写</span></button>
-
-          <button class="flow-node graph-node graph-node--music-reference is-reference" type="button" data-node="music-reference" data-title="音乐参考" data-input="作者提供的音乐样例或方向说明。" data-handoff="曲风、配器、情绪和节奏偏好。" data-output="与内容总览、场景用途一起生成音乐资产。"><span class="node-title">音乐参考 <b class="node-state">外部参考</b></span><span class="node-value">风格 / 配器 / 情绪</span></button>
-          <button class="flow-node graph-node graph-node--music-assets is-plan" type="button" data-node="music-assets" data-title="音乐资产" data-input="内容总览、音乐参考、场景情绪与用途。" data-handoff="曲风标签、生成提示、候选版本、循环点。" data-output="审阅通过后按场景和触发位置进入 Script。"><span class="node-title">音乐资产 <b class="node-state">规划中</b></span><span class="node-value">内容总览 + 音乐参考</span></button>
-          <button class="flow-node graph-node graph-node--background-assets is-partial" type="button" data-node="background-assets" data-title="背景资产" data-input="内容总览、场景地点/时间与构图要求。" data-handoff="固定机位、环境、光线、画面规格、候选版本。" data-output="候选需手动入库并在演出 JSON 绑定。" data-target="#image-studio"><span class="node-title">背景资产 <b class="node-state" data-flow-id="flow-background-state">候选可生成</b></span><span class="node-value">场景可带入构图建议</span></button>
-
-          <button class="flow-node graph-node graph-node--portrait-baseline is-plan" type="button" data-node="portrait-baseline" data-title="角色基准立绘" data-input="角色概览与角色参考。" data-handoff="稳定的身份、服装、画风和画布锚点。" data-output="作为立绘差分和 CG 的统一外观来源。"><span class="node-title">角色基准立绘 <b class="node-state">规划中</b></span><span class="node-value">角色概览 + 角色参考</span></button>
-          <button class="flow-node graph-node graph-node--voice-baseline is-plan" type="button" data-node="voice-baseline" data-title="角色声音基准" data-input="角色概览与人声参考。" data-handoff="角色专属音色、发音、语速、音域与表演倾向。" data-output="与 Scenario 已确认台词合并，形成角色语音。"><span class="node-title">角色声音基准 <b class="node-state">规划中</b></span><span class="node-value">角色概览 + 人声参考</span></button>
-
-          <button class="flow-node graph-node graph-node--character-reference is-reference" type="button" data-node="character-reference" data-title="角色参考" data-input="作者提供的角色图像或文字参考。" data-handoff="身份、发型、服装和画风锚点。" data-output="与角色概览合并，确定角色基准立绘。"><span class="node-title">角色参考 <b class="node-state">外部参考</b></span><span class="node-value">形象 / 服装 / 画风</span></button>
-          <button class="flow-node graph-node graph-node--voice-reference is-reference" type="button" data-node="voice-reference" data-title="人声参考" data-input="作者提供的人声样例或描述。" data-handoff="音色、口音、语速与表演偏好。" data-output="与角色概览合并，确定角色声音基准。"><span class="node-title">人声参考 <b class="node-state">外部参考</b></span><span class="node-value">音色 / 发音 / 表演</span></button>
-
-          <button class="flow-node graph-node graph-node--sprite-assets is-partial" type="button" data-node="sprite-assets" data-title="立绘资产" data-input="目标上游是审阅通过的角色基准立绘。" data-handoff="角色身份、服装、表情差分和动作。" data-output="当前可生成独立候选；基准身份尚未自动继承。" data-target="#image-studio"><span class="node-title">立绘资产 <b class="node-state" data-flow-id="flow-sprite-state">可生成候选</b></span><span class="node-value">差分 / 表情</span></button>
-          <button class="flow-node graph-node graph-node--cg-assets is-partial" type="button" data-node="cg-assets" data-title="CG 资产" data-input="目标上游是角色基准立绘与场景动作。" data-handoff="身份、服装、姿势、表情、场景构图。" data-output="当前可生成独立候选；基准身份尚未自动继承。" data-target="#image-studio"><span class="node-title">CG 资产 <b class="node-state" data-flow-id="flow-cg-state">可生成候选</b></span><span class="node-value">角色基准 + 场景动作</span></button>
-          <button class="flow-node graph-node graph-node--voice-assets is-partial" type="button" data-node="voice-assets" data-title="人声资产" data-input="Scenario 台词/确认说话人、角色声音基准。" data-handoff="台词 ID、音频片段、语气与版本。" data-output="当前可手动上传并绑定；审批链待接入。" data-target="#cue-panel"><span class="node-title">人声资产 <b class="node-state" data-flow-id="flow-voice-state">可手动挂接</b></span><span class="node-value">台词 + 声音基准</span></button>
-        </div>
+      </section>
+      <section id="production" class="workspace-view" data-project-view data-workspace-view="演出与脚本" hidden>
+        <section class="panel script-ide" id="script-ide" aria-labelledby="ide-title">
+          <div class="panel-head">
+            <h2 id="ide-title">script.rpy</h2>
+            <button id="ide-generate" type="button">从 Scenario 生成</button>
+            <label class="file-button">导入 .rpy<input id="ide-import" type="file" accept=".rpy,text/plain" aria-label="导入 Ren’Py 脚本"></label>
+            <button id="ide-reload" type="button">读取最新</button>
+            <button id="ide-previous" type="button" disabled>载入上一版</button>
+            <button id="ide-save" class="primary" type="button" disabled>保存草稿</button>
+            <button id="ide-export" type="button">下载已通过工程</button>
+          </div>
+          <div class="ide-workspace">
+            <div class="ide-source">
+              <div class="story-modes" role="group" aria-label="脚本编辑视图">
+                <button id="ide-story-mode" type="button" aria-pressed="true">剧情</button>
+                <button id="ide-source-mode" type="button" aria-pressed="false">源码</button>
+              </div>
+              <section id="ide-story" aria-label="剧情编辑">
+                <div class="story-toolbar">
+                  <label>场景<select id="story-scene"></select></label>
+                  <form id="story-new-scene"><label>新场景标签<input id="story-new-name" placeholder="如 ending" autocomplete="off"></label><button type="submit">新建场景</button></form>
+                  <button id="story-play" type="button" disabled>试玩本场</button>
+                </div>
+                <details class="story-characters"><summary>角色</summary><form id="story-new-character" class="story-toolbar"><label>标识<input id="story-character-id" placeholder="如 lin" required></label><label>显示名<input id="story-character-name" required></label><button type="submit">添加角色</button></form></details>
+                <p id="story-status" class="hint" role="status"></p>
+                <ol id="story-rows" class="story-rows" aria-label="剧情行"></ol>
+                <div class="story-toolbar story-add">
+                  <label>剧情命令<select id="story-command"><option value="dialogue">台词或旁白</option><option value="menu">分支选项</option><option value="jump">跳转场景</option><option value="return">结束剧情</option><option value="stop">停止音乐</option></select></label>
+                  <button id="story-add" type="button" disabled>添加剧情行</button>
+                  <span id="story-insertion" class="hint"></span>
+                </div>
+                <div id="story-form"></div>
+              </section>
+              <div id="ide-source-editor" hidden>
+              <div class="ide-navigation">
+                <label>场景标签<select id="ide-label"><option value="">跳转到 label</option></select></label>
+                <form id="ide-find-form"><label>查找<input id="ide-find" type="search" autocomplete="off"></label><button type="submit">下一个</button></form>
+              </div>
+              <label class="sr-only" for="ide-code">Ren’Py 脚本源码</label>
+              <textarea id="ide-code" rows="22" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="从 Scenario 生成，或直接编写 Ren’Py 源码。"></textarea>
+              </div>
+              <div class="ide-status"><span id="ide-position">行 1，列 1</span><span id="ide-version"></span><span id="ide-message" role="status"></span></div>
+            </div>
+            <aside class="ide-assets" aria-labelledby="ide-assets-title">
+              <h3 id="ide-assets-title">已通过资产</h3>
+              <label>素材<select id="ide-asset"><option value="">选择素材</option></select></label>
+              <div id="ide-media" class="script-media"></div>
+              <label>插入内容<select id="ide-action"><option value="path">文件路径</option></select></label>
+              <button id="ide-insert" type="button" disabled>插入剧情行</button>
+              <p id="ide-assets-status" class="hint" role="status"></p>
+              <a href="#approved-assets">管理已通过资产</a>
+            </aside>
+          </div>
+          <dialog id="story-preview" class="story-preview" aria-labelledby="story-preview-title">
+            <div class="story-preview-header"><h3 id="story-preview-title">剧情试玩</h3><form method="dialog"><button type="submit">关闭</button></form></div>
+            <div class="story-preview-stage"><div id="story-preview-bg" class="story-preview-layer"></div><div id="story-preview-actor" class="story-preview-layer"></div><div id="story-preview-output" class="story-preview-output" aria-live="polite"></div></div>
+            <audio id="story-preview-music" loop></audio><audio id="story-preview-sound"></audio><audio id="story-preview-voice"></audio>
+          </dialog>
+        </section>
+        <section class="panel" id="script-workbench" aria-labelledby="script-title">
+      <div class="panel-head">
+        <h2 id="script-title"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-code"></use></svg>Ren’Py 脚本工作台</h2>
+        <button id="script-preview" type="button"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-play"></use></svg>生成脚本预览</button>
       </div>
-      <p class="flow-graph-hint"><span>箭头表示信息依赖</span><span>选择节点查看交接字段</span><span>可横向滚动</span></p>
-
-      <div class="flow-legend" aria-label="管线状态说明"><span class="legend-live">已接通</span><span class="legend-partial">部分接通</span><span class="legend-plan">规划中</span><span class="legend-reference">参考输入</span></div>
-
-      <aside class="flow-inspector" aria-live="polite">
-        <div class="inspector-title"><span>信息交接</span><strong id="flow-detail-title">Scenario</strong><b id="flow-detail-state" class="node-state">等待生成</b></div>
-        <dl><dt>来源</dt><dd id="flow-detail-input">Raw Text、起始章节和说话人映射。</dd>
-          <dt>传递内容</dt><dd id="flow-detail-handoff">章节、场景 ID、台词顺序、说话人和每句的触发位置。</dd>
-          <dt>下游用途</dt><dd id="flow-detail-output">供章节/内容/角色摘要、台词配音和 Script 演出绑定使用。</dd></dl>
-        <p id="flow-detail-current" class="inspector-current"></p>
-        <a id="flow-detail-link" class="section-link" href="#scenario-panel">打开对应编辑器 ↓</a>
-      </aside>
-
-      <details class="flow-ledger">
-        <summary>交接字段与分支状态（展开查看）</summary>
-      <div class="flow-table-wrap" tabindex="0" aria-label="制作分支的来源、交接信息和下游去向">
-        <table class="pipeline-table">
-          <thead><tr><th scope="col">支线 / 产物</th><th scope="col">上游信息</th><th scope="col">管线交接字段</th><th scope="col">产物去向</th></tr></thead>
-          <tbody>
-            <tr>
-              <th scope="row"><div class="table-path">
-                <button class="flow-node flow-table-node is-live" type="button" data-node="raw" data-title="Raw Text" data-input="作者导入的原文、起始章节和说话人映射。" data-handoff="原文段落、章节标题、说话人线索。" data-output="交给 Scenario 草稿器，生成可校对的剧本结构。" data-target="#raw-panel"><span class="node-title">Raw Text <b id="flow-raw-state" class="node-state">等待原文</b></span><span id="flow-raw-value" class="node-value">原文 + 章节起点 + 说话人映射</span></button>
-                <span class="table-arrow">↓</span>
-                <button class="flow-node flow-table-node is-live" type="button" data-node="scenario" data-title="Scenario" data-input="Raw Text、起始章节和说话人映射；也可以直接导入或编辑 Scenario。" data-handoff="章节、场景 ID、台词顺序、说话人和每句的触发位置。" data-output="供摘要分支、台词配音和 Script 演出绑定使用。" data-target="#scenario-panel"><span class="node-title">Scenario <b id="flow-scenario-state" class="node-state">等待生成</b></span><span id="flow-scenario-value" class="node-value">章节 → 场景 ID → 有序台词与说话人</span></button>
-              </div></th>
-              <td>原文正文、章节标题、说话人映射；也可直接导入 Scenario。</td>
-              <td>章节结构、场景 ID、台词顺序、说话人与正文行。</td>
-              <td>章节/内容/角色摘要；按场景和台词定位演出，进入 Script。</td>
-            </tr>
-            <tr>
-              <th scope="row"><button class="flow-node flow-table-node is-plan" type="button" data-node="chapter-brief" data-title="章节梗概" data-input="Scenario 中属于该章节的场景和台词。" data-handoff="按章审阅的事件、人物变化与承接关系。" data-output="供作者确认章节理解，再作为其他分支可选上下文。"><span class="node-title">章节梗概 <b class="node-state">规划中</b></span><span class="node-value">按章节提取 · 作者审阅</span></button></th>
-              <td>Scenario 中该章节的场景与台词。</td>
-              <td>章节事件、人物变化、前后承接关系。</td>
-              <td>作者审阅；修订后作为分支上下文。</td>
-            </tr>
-            <tr>
-              <th scope="row"><button class="flow-node flow-table-node is-plan" type="button" data-node="content-overview" data-title="内容总览" data-input="全篇 Scenario。" data-handoff="时空范围、地点、氛围、世界观与作品基调。" data-output="为背景和音乐生成提供上下文；音乐分支还接收音乐参考。"><span class="node-title">内容总览 <b class="node-state">规划中</b></span><span class="node-value">全文场景与情节脉络</span></button></th>
-              <td>全篇 Scenario。</td>
-              <td>时空范围、地点关系、世界观、整体氛围与音乐基调。</td>
-              <td>交给背景与音乐分支；音乐另接音乐参考。</td>
-            </tr>
-            <tr>
-              <th scope="row"><button class="flow-node flow-table-node is-plan" type="button" data-node="music-assets" data-title="音乐资产" data-input="内容总览、音乐参考和场景的情绪/用途标签。" data-handoff="可检索的音乐需求、生成提示、候选和循环版本。" data-output="审批通过后按场景和触发位置挂到 Script。"><span class="node-title">音乐资产 <b class="node-state">规划中</b></span><span class="node-value">内容总览 + 音乐参考</span></button></th>
-              <td>内容总览、音乐参考、场景情绪与用途。</td>
-              <td>情绪/曲风标签、配器提示、候选版本、循环点。</td>
-              <td>审阅通过后按场景与触发位置交给 Script。</td>
-            </tr>
-            <tr>
-              <th scope="row"><button class="flow-node flow-table-node is-partial" type="button" data-node="background-assets" data-title="背景资产" data-input="内容总览、场景地点/时间与作者补充的构图要求。" data-handoff="固定机位、地点氛围、画面规格和候选图。" data-output="候选审阅后，按场景挂到 Script。" data-target="#image-studio"><span class="node-title">背景资产 <b id="flow-background-state" class="node-state">候选可生成</b></span><span class="node-value">场景可带入构图建议；仍需手动入库</span></button></th>
-              <td>内容总览、场景地点/时间、作者构图要求。</td>
-              <td>机位、环境、光线、画面规格、候选版本。</td>
-              <td>候选可生成；手动加入素材并通过演出 JSON 绑定。</td>
-            </tr>
-            <tr>
-              <th scope="row"><button class="flow-node flow-table-node is-plan" type="button" data-node="character-overview" data-title="角色概览" data-input="Scenario 中角色相关的行动、对白和称谓。" data-handoff="角色身份、性格、关系、外观线索和声音线索。" data-output="分别与角色参考、人声参考合并，形成视觉和声音基准。"><span class="node-title">角色概览 <b class="node-state">规划中</b></span><span class="node-value">角色 ID / 性格 / 关系 / 描写</span></button></th>
-              <td>Scenario 中人物行动、对白、称谓与关系。</td>
-              <td>统一角色 ID、性格、关系、外观线索、声音线索。</td>
-              <td>分送角色基准立绘与角色声音基准。</td>
-            </tr>
-            <tr>
-              <th scope="row"><div class="table-path">
-                <button class="flow-node flow-table-node is-plan" type="button" data-node="portrait-baseline" data-title="角色基准立绘" data-input="角色概览与角色参考。" data-handoff="稳定的脸、发型、身形、服装、画风和画布锚点。" data-output="作为角色差分与 CG 的统一身份依据。"><span class="node-title">角色基准立绘 <b class="node-state">规划中</b></span><span class="node-value">角色概览 + 角色参考</span></button>
-                <span class="table-arrow">↓</span>
-                <button class="flow-node flow-table-node is-partial" type="button" data-node="sprite-assets" data-title="立绘资产" data-input="目标上游是审阅通过的角色基准立绘。" data-handoff="角色身份、服装、表情差分和动作。" data-output="当前可生成独立候选；基准身份尚未自动继承。" data-target="#image-studio"><span class="node-title">立绘差分 <b class="node-state" data-flow-id="flow-sprite-state">可生成候选</b></span><span class="node-value">目标沿用基准 · 当前单次生成</span></button>
-                <span class="table-arrow">↓</span>
-                <button class="flow-node flow-table-node is-partial" type="button" data-node="cg-assets" data-title="CG 资产" data-input="目标上游是角色基准立绘与场景动作。" data-handoff="角色身份、服装、姿势、表情与场景构图。" data-output="当前可生成独立候选；基准身份尚未自动继承。" data-target="#image-studio"><span class="node-title">CG 资产 <b class="node-state" data-flow-id="flow-cg-state">可生成候选</b></span><span class="node-value">当前单次生成；未自动继承基准</span></button>
-              </div></th>
-              <td>角色概览 + 角色参考；差分和 CG 再接基准立绘与场景动作。</td>
-              <td>身份锚点、服装、画风、姿势/表情、画布规格。</td>
-              <td>基准立绘作为差分/CG 的外观来源；当前可生成独立候选，尚未自动继承。</td>
-            </tr>
-            <tr>
-              <th scope="row"><button class="flow-node flow-table-node is-plan" type="button" data-node="voice-baseline" data-title="角色声音基准" data-input="角色概览与人声参考。" data-handoff="角色专属的音色、发音、语速和表演基线。" data-output="与 Scenario 的已确认台词合并，生成角色语音。"><span class="node-title">角色声音基准 <b class="node-state">规划中</b></span><span class="node-value">角色概览 + 人声参考</span></button></th>
-              <td>角色概览、人声参考。</td>
-              <td>音色、发音、语速、音域和表演倾向。</td>
-              <td>作为角色专属基准，供台词语音分支复用。</td>
-            </tr>
-            <tr>
-              <th scope="row"><button class="flow-node flow-table-node is-partial" type="button" data-node="voice-assets" data-title="角色语音" data-input="Scenario 台词、确认的说话人和角色声音基准。" data-handoff="台词 ID、音频片段、演出语气与版本。" data-output="审批通过后按台词 ID 进入 Script。" data-target="#cue-panel"><span class="node-title">角色语音 <b id="flow-voice-state" class="node-state">可手动挂接</b></span><span class="node-value">台词 + 声音基准 → 人声片段</span></button></th>
-              <td>Scenario 台词/确认说话人 + 角色声音基准。</td>
-              <td>台词 ID、语气、音频片段和版本记录。</td>
-              <td>当前可手动上传并绑定；生成与审批链待接入。</td>
-            </tr>
-            <tr>
-              <th scope="row"><button class="flow-node flow-table-node is-live" type="button" data-node="script" data-title="Scripts" data-input="Scenario、按场景/台词位置编排的 cues，以及被引用的媒体文件。" data-handoff="背景、立绘、音乐、音效、配音和触发位置。" data-output="生成 Ren’Py 脚本并把引用素材打包；未审核的候选不会自动进入。" data-target="#cue-panel"><span class="node-title">Scripts / Ren’Py <b id="flow-script-state" class="node-state">等待解析</b></span><span id="flow-script-value" class="node-value">Scenario + cue JSON + 实际引用文件</span></button></th>
-              <td>Scenario、演出 cues、审阅通过的资产文件。</td>
-              <td>场景/台词触发点、动作类型、角色 ID、文件引用。</td>
-              <td>生成 Ren’Py 脚本并复制被引用文件；<strong id="flow-export-state">尚未导出</strong>。</td>
-            </tr>
-          </tbody>
-        </table>
+      <p id="script-status" class="hint" aria-live="polite">生成预览后，点选代码中的台词，再从右侧插入项目素材。</p>
+      <div class="script-layout">
+        <div id="script-code" class="script-code" role="region" aria-label="生成的 Ren’Py 代码" tabindex="0"></div>
+        <form id="script-bind" class="script-bind">
+          <h3>演出动作</h3>
+          <p id="script-location" class="hint">尚未选择台词</p>
+          <label>插入位置<select id="script-point" aria-label="选择台词"></select></label>
+          <label>修改方式<select id="script-replace"><option value="">新增动作</option></select></label>
+          <label>动作<select id="script-action">
+            <option value="background">切换背景</option><option value="show">显示立绘</option>
+            <option value="hide">隐藏立绘</option><option value="music">播放音乐</option><option value="stop">停止音乐</option>
+            <option value="sound">播放音效</option><option value="voice">插入配音</option>
+          </select></label>
+          <label id="script-actor-row" hidden>角色<input id="script-actor" type="text"></label>
+          <label id="script-asset-row">素材<select id="script-asset"></select></label>
+          <div id="script-media" class="script-media"></div>
+          <button id="script-insert" class="primary" type="submit" disabled>应用演出动作</button>
+        </form>
       </div>
-      </details>
-
-      <div class="active-route" aria-label="当前 WebUI 已接通的数据路径">
-        <div class="active-route-heading"><span class="live-dot"></span><strong>当前 WebUI 已接通</strong><span>页面会话内传递</span></div>
-        <div class="active-route-steps">
-          <button type="button" class="route-step" data-target="#raw-panel"><b>Raw Text</b><small>正文 / 章节 / 说话人映射</small></button><span class="route-arrow">→</span>
-          <button type="button" class="route-step" data-target="#scenario-panel"><b>Scenario</b><small>章节 / 场景 ID / 有序台词</small></button><span class="route-arrow">→</span>
-          <button type="button" class="route-step" data-target="#scene-panel"><b>场景与台词</b><small>行号 / 说话人 / 当前触发点</small></button><span class="route-arrow">→</span>
-          <button type="button" class="route-step" data-target="#image-studio"><b>Prompt / 候选</b><small>场景上下文 → 生成 → 加入素材</small></button><span class="route-arrow">→</span>
-          <button type="button" class="route-step" data-target="#cue-panel"><b>Scripts / Ren’Py ZIP</b><small>Scenario + cues + 被引用文件</small></button>
-        </div>
-      </div>
-
     </section>
-
-    <div class="editors">
-      <section id="raw-panel" class="panel" aria-labelledby="raw-title">
-        <div class="panel-head">
-          <h2 id="raw-title"><label for="raw">原文</label></h2>
-          <label class="file-button">导入 TXT<input id="raw-file" type="file" accept=".txt,.md,text/plain" aria-label="导入原文"></label>
-        </div>
-        <textarea id="raw" spellcheck="false" placeholder="粘贴小说文本，或导入 UTF-8 文件。"></textarea>
-        <div class="panel-foot">
-          <label for="heading">起始章节</label>
-          <input id="heading" type="text" placeholder="# 序章（可选）">
-          <button id="draft" class="primary" type="button">生成 Scenario</button>
-        </div>
-        <details>
-          <summary>说话人映射</summary>
-          <label for="speakers">按原文行号填写 JSON，未指定的对白标为「？：」。</label>
-          <textarea id="speakers" class="code compact" spellcheck="false" placeholder='{"6": "林岚", "7": "周明"}'></textarea>
-        </details>
-      </section>
-
-      <section id="scenario-panel" class="panel" aria-labelledby="scenario-title">
-        <div class="panel-head">
-          <h2 id="scenario-title"><label for="scenario">Scenario</label></h2>
-          <label class="file-button">导入 MD<input id="scenario-file" type="file" accept=".md,.txt,text/plain" aria-label="导入 Scenario"></label>
-          <button id="save-scenario" type="button">下载</button>
-        </div>
-        <textarea id="scenario" spellcheck="false" placeholder="在这里编辑剧本。把「？：」改成角色名，或改为无署名正文。"></textarea>
-        <div class="panel-foot">
-          <span id="scene-summary">等待解析</span>
-          <button id="inspect" type="button">解析场景</button>
-          <button id="anchor-scenario" type="button" title="为新增文本补充 ID，并按当前编号转换已有演出">固定演出位置</button>
-        </div>
-      </section>
-    </div>
-
-    <div class="editors staging">
-      <section id="scene-panel" class="panel" aria-labelledby="scene-title">
-        <div class="panel-head">
-          <h2 id="scene-title">场景与台词</h2>
-          <select id="scene" aria-label="选择场景" disabled><option>暂无场景</option></select>
-        </div>
-        <div id="lines" class="lines" aria-label="场景台词"></div>
-        <p class="hint">点击一条文本添加演出。要转换旧的编号绑定，请核对当前编号后点「固定演出位置」。</p>
-      </section>
-
-      <section id="cue-panel" class="panel" aria-labelledby="cue-title">
-        <div class="panel-head">
-          <h2 id="cue-title">演出与素材</h2>
-          <a class="section-link" href="#image-studio">生成图片</a>
-          <label class="file-button">添加素材<input id="files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.ogg,.opus,.mp3,.wav,.flac,.ttf,.otf,.ttc" aria-label="添加素材文件"></label>
-        </div>
-        <div id="file-list" class="files">可添加图片、音频和字体。素材文件按名称引用。</div>
+        <details id="cue-panel" class="panel" aria-labelledby="cue-title">
+        <summary id="cue-title">高级：演出动作与 JSON</summary>
+        <p class="hint"><a href="#stage-scenario">从剧本选中台词</a>后，可以使用下方表单追加动作。</p>
         <form id="cue-form" class="cue-form">
           <output id="anchor" for="scene">选择一条台词</output>
           <label class="sr-only" for="action">演出动作</label>
@@ -313,16 +554,23 @@
           <button id="save-cues" type="button">下载</button>
         </div>
         <textarea id="cues" class="code compact" spellcheck="false">{}</textarea>
-        <div class="panel-foot">
-          <label for="font">字体</label>
-          <select id="font"><option value="">Ren’Py 默认</option></select>
-          <button id="build" class="primary" type="button">下载 Ren’Py ZIP</button>
-        </div>
+      </details>
       </section>
-    </div>
-    <section class="panel image-studio" id="image-studio" aria-labelledby="image-title">
+      <section id="export-panel" class="workspace-view" data-project-view data-workspace-view="工程导出" hidden>
+        <section class="panel export-panel" id="export-tools">
+          <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-display"></use></svg>Ren’Py 工程</h2>
+          <p id="export-state" role="status" class="hint"></p>
+          <ul id="export-checklist" class="export-checklist"></ul>
+          <div class="studio-actions section-actions">
+            <button id="build" class="primary" type="button" disabled><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-export"></use></svg>下载 Ren’Py ZIP</button>
+            <a class="section-link" href="#stage-script">查看脚本</a>
+          </div>
+        </section>
+      </section>
+      <section id="images" class="workspace-view" data-project-view data-workspace-view="图像与资产提示词" hidden>
+        <section class="panel image-studio" id="image-studio" aria-labelledby="image-title">
       <div class="panel-head">
-        <h2 id="image-title">图像工作室</h2>
+        <h2 id="image-title"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-image"></use></svg>图像工作室</h2>
         <button id="image-refresh" type="button">刷新环境</button>
       </div>
       <p class="hint studio-intro">从提示词生成背景、立绘或 CG。选中的候选图可加入当前工程素材。</p>
@@ -335,16 +583,17 @@
             <label><input type="radio" name="image-mode" value="online"><span>在线模型</span></label>
           </fieldset>
           <p id="image-mode-note" class="hint"></p>
-          <div class="studio-actions prompt-actions">
+          <div id="image-prompt-tools"><div class="studio-actions prompt-actions">
             <label for="image-preset" class="sr-only">提示词样例</label>
             <select id="image-preset"><option value="">载入提示词样例</option><option value="portrait">军服近景肖像</option><option value="duo">双人花园</option><option value="library">图书馆日常</option></select>
             <button id="image-scene" type="button">带入当前场景</button>
           </div>
           <label class="studio-field" for="image-prompt">提示词</label>
           <textarea id="image-prompt" class="image-prompt" maxlength="4000" required placeholder="例如：一名短发女军官在明亮的石庭中回头，蓝白礼服，鲜艳的赛璐璐平涂。"></textarea>
+          </div>
           <fieldset id="image-local" class="studio-grid">
             <legend class="sr-only">本地推理参数</legend>
-            <label class="studio-wide">负面提示词<textarea id="image-negative" class="negative-prompt" maxlength="4000">worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, chromatic aberration, bad anatomy, extra limbs, text, watermark</textarea></label>
+            <label id="image-negative-row" class="studio-wide">负面提示词<textarea id="image-negative" class="negative-prompt" maxlength="4000">worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, chromatic aberration, bad anatomy, extra limbs, text, watermark</textarea></label>
             <label>LoRA<select id="image-lora"><option value="">底模</option></select></label>
             <label>本地底模<select id="image-base-model"><option value="anima">Anima Base · MLX</option></select></label>
             <label>同 seed 对照<select id="image-compare"><option value="none">关闭</option></select></label>
@@ -365,12 +614,12 @@
           </fieldset>
           <div class="studio-actions image-submit">
             <label>张数 <input id="image-count" type="number" min="1" max="4" value="1" required></label>
-            <button id="image-generate" class="primary" type="submit" disabled>生成候选图</button>
+            <button id="image-generate" class="primary" type="submit" disabled><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-spark"></use></svg>生成候选图</button>
           </div>
         </form>
 
-        <section class="image-card" aria-labelledby="image-result-title">
-          <div class="panel-head"><h2 id="image-result-title">候选与任务</h2><button id="image-reuse" type="button" hidden>复用生成参数</button><button id="image-replay" type="button" hidden>复跑本地任务</button><button id="image-cancel" type="button" hidden>取消任务</button></div>
+        <section id="image-results" class="image-card" aria-labelledby="image-result-title">
+          <div class="panel-head"><h2 id="image-result-title"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-history"></use></svg>候选与任务</h2><button id="image-reuse" type="button" hidden>复用生成参数</button><button id="image-replay" type="button" hidden>复跑本地任务</button><button id="image-cancel" type="button" hidden>取消任务</button></div>
           <label class="studio-field">任务记录<select id="image-history"><option value="">暂无任务</option></select></label>
           <p id="image-phase" class="hint">生成或训练完成后，可在这里查看产物。</p>
           <progress id="image-progress" max="100" aria-label="当前任务进度" hidden></progress>
@@ -380,10 +629,31 @@
         </section>
       </div>
 
-      <details id="local-toolkit" class="image-toolkit">
-        <summary>本地工具箱 · 安装与 LoRA</summary>
+      <a class="section-link" href="#stage-models">管理本地模型与工具</a>
+    </section>
+      </section>
+      <section id="models" class="workspace-view" data-project-view data-workspace-view="模型、工具与训练" hidden>
+        <div id="local-toolkit" class="panel toolkit-panel">
+        <div class="panel-head">
+          <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-layers"></use></svg>模型和 LoRA</h2><a class="section-link" href="#stage-candidates">查看生成与训练任务</a>
+        </div>
+        <p id="toolkit-status" class="hint" role="status" aria-live="polite"></p>
+        <section id="image-existing-lora" class="existing-lora" aria-labelledby="existing-lora-title">
+          <h3 id="existing-lora-title">使用已有 LoRA</h3>
+          <p class="hint">选择已登记的权重，或导入新文件。选择后可直接进入生成界面。</p>
+          <div class="studio-grid">
+            <label>已有权重<select id="image-existing-lora-select"><option value="">选择已有 LoRA</option></select></label>
+            <label>导入文件的底模系列<select id="image-import-family"><option value="sd1">SD 1.x</option><option value="sdxl">SDXL</option><option value="anima">Anima</option></select></label>
+          </div>
+          <div class="studio-actions section-actions">
+            <button id="image-use-existing-lora" class="primary" type="button" disabled>用于本地生成</button>
+            <label class="file-button">导入权重文件<input id="image-import-lora" type="file" accept=".safetensors" aria-label="导入 LoRA 权重"></label>
+            <button id="image-refresh-loras" type="button">刷新权重列表</button>
+          </div>
+          <p class="hint">浏览器可上传最大 45 MiB 的 .safetensors 文件。更大的权重可放到共享工作目录的 <code>loras/</code>（SD 1.x）、<code>loras/sdxl/</code> 或 <code>loras/anima/</code>，再刷新列表。</p>
+        </section>
         <div class="image-columns toolkit-columns">
-          <section class="image-card" aria-labelledby="toolchain-title">
+          <section class="image-card" id="image-toolchain" aria-labelledby="toolchain-title">
             <h3 id="toolchain-title">安装与权重</h3>
             <dl id="image-environment" class="image-env"></dl>
             <label class="studio-field">要安装的训练底模<select id="image-install-base">
@@ -396,8 +666,6 @@
               <button id="image-install-train" type="button" disabled>拉取所选 LoRA 工具链</button>
             </div>
             <p class="hint">训练底模可选 SD 1.x、SDXL、Iris-3B 或 Apple Silicon / MLX 上的 Anima Base 动漫模型。Anima LoRA 与 ComfyUI 兼容，模型和衍生权重仅限非商业用途；任务会记录模型修订、文件哈希、训练参数和产物。</p>
-            <label class="studio-field">导入现成 SD 1.x LoRA（.safetensors）<input id="image-import-lora" type="file" accept=".safetensors"></label>
-            <p class="hint">Apple Silicon 可在本机预览 Animagine XL SDXL LoRA；SD 1.x LoRA 的本地试画使用 Windows 工具链。浏览器单次可导入 45 MiB；更大的 SD 1.x 权重可放进工具箱的 loras 目录，再刷新环境。</p>
           </section>
           <form id="image-train-form" class="image-card">
             <h3>训练新 LoRA</h3>
@@ -414,7 +682,7 @@
               <label>每张重复次数<input id="image-train-repeats" type="number" min="1" max="50" value="10" required></label>
               <label>训练 Seed<input id="image-train-seed" type="number" min="0" max="2147483647" value="1065270805" required></label>
             </div>
-            <div class="studio-actions image-submit"><button id="image-train" class="primary" type="submit" disabled>开始训练</button></div>
+            <div class="studio-actions image-submit"><button id="image-train" class="primary" type="submit" disabled><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-play"></use></svg>开始训练</button></div>
           </form>
         </div>
         <form id="image-dataset-form" class="image-card dataset-card">
@@ -434,9 +702,20 @@
           <div id="image-dataset-items" class="dataset-items"></div>
           <div class="studio-actions image-submit"><a id="image-dataset-export" href="#" hidden>下载数据集 ZIP</a><button id="image-dataset-save" type="submit" disabled>保存数据集</button></div>
         </form>
-      </details>
-    </section>
-    <footer>解压 ZIP 后可在 Ren’Py SDK 中打开工程。</footer>
-  </main>
+      </div>
+      </section>
+      </div>
+    </main>
+    <dialog id="project-history-dialog" class="project-history-dialog" aria-labelledby="project-history-title">
+      <section class="panel project-history-panel">
+        <div class="project-dialog-heading"><h2 id="project-history-title"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-history"></use></svg>写入历史</h2><button id="project-history-close" class="icon-button" type="button" aria-label="关闭"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-close"></use></svg></button></div>
+        <p class="hint">每次自动写入都会形成可恢复的版本。恢复历史版本会新增一条版本记录。</p>
+        <ol id="project-history-list" class="project-history-list"></ol>
+      </section>
+    </dialog>
+    <footer class="workspace-statusbar" aria-label="工作台状态">
+      <div id="status" class="status" role="status" aria-live="polite">就绪</div>
+    </footer>
+  </div>
 </body>
 </html>

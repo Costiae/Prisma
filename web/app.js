@@ -10,11 +10,76 @@ const cues = field('cues');
 const lineCues = 'by_line_id';
 const uploads = new Map();
 const managedAssets = new WeakMap();
+const scenarioData = () => scenario.value ? JSON.parse(scenario.value) : undefined;
+const llmSettingSuffixes = {mode: 'mode', base_url: 'url', model: 'model', temperature: 'temperature',
+  max_tokens: 'tokens', timeout: 'timeout', system_prompt: 'system'};
+const projectConfigIds = [
+  'project-width', 'project-height', 'config-llm-mode', 'config-llm-url', 'config-llm-model',
+  'config-llm-temperature', 'config-llm-tokens', 'config-llm-timeout', 'config-llm-system',
+  'config-llm-scenario-enabled', 'config-llm-scenario-mode', 'config-llm-scenario-url', 'config-llm-scenario-model',
+  'config-llm-scenario-temperature', 'config-llm-scenario-tokens', 'config-llm-scenario-timeout',
+  'config-llm-scenario-system', 'config-image-mode', 'config-image-base',
+  'config-image-lora', 'config-image-compare', 'config-image-weight', 'config-image-size',
+  'config-image-sampler', 'config-image-steps', 'config-image-cfg', 'config-image-seed',
+  'config-image-count', 'config-image-online-model', 'config-image-online-size', 'config-image-quality',
+  'config-image-negative', 'config-train-base', 'config-train-dataset', 'config-train-parent',
+  'config-train-name', 'config-train-steps', 'config-train-save', 'config-train-rank',
+  'config-train-lr', 'config-train-repeats', 'config-train-seed', 'config-prompt-style', 'config-prompt-negative',
+];
 let openProject = null;
-let selectedPipelineNode = null;
+let projectScopeId;
+let projectWriteTimer;
+let projectWriteInFlight = false;
+let projectWritePromise;
+let failedWriteFingerprint = null;
+let projectHistoryItems = [];
+let scenarioLlmOverrideInitialized = false;
+const projectScope = () => openProject ? {project_id: openProject.id} : {};
+
+function updateProjectScope() {
+  const current = field('project-current');
+  current.textContent = openProject ? field('project-name').value || '未命名项目' : '未打开项目';
+  current.title = current.textContent;
+  field('project-scope').hidden = !openProject;
+  field('project-nav').hidden = !openProject;
+  updateWorkspaceTitle(document.querySelector('[data-workspace-view]:not([hidden])'));
+  updateWorkspaceStatus();
+  field('project-close').disabled = !openProject;
+  if (projectScopeId !== openProject?.id) {
+    projectScopeId = openProject?.id;
+    document.dispatchEvent(new Event('prisma-project-change'));
+  }
+}
+
+function updateWorkspaceTitle(view) {
+  if (!view) return;
+  const title = view.dataset.workspaceView;
+  field('workspace-title').textContent = title;
+  const scope = openProject && view.id !== 'project-manager' ? `${field('project-current').textContent} · ` : '';
+  document.title = `${scope}${title} · Prisma`;
+}
+
+function uiIcon(name) {
+  const namespace = 'http://www.w3.org/2000/svg';
+  const icon = document.createElementNS(namespace, 'svg');
+  icon.classList.add('ui-icon');
+  icon.setAttribute('aria-hidden', 'true');
+  icon.setAttribute('focusable', 'false');
+  const use = document.createElementNS(namespace, 'use');
+  use.setAttribute('href', `#icon-${name}`);
+  icon.append(use);
+  return icon;
+}
+let editorBaseline = null;
 let exported = false;
 const imageExtensions = /\.(png|jpe?g|webp)$/i;
 const audioExtensions = /\.(ogg|opus|mp3|wav|flac)$/i;
+
+function scriptInputs() {
+  const assetIds = Object.fromEntries([...uploads].map(([name, file]) => [name, managedAssets.get(file)]));
+  return {scenario: scenarioData(), cues: cues.value, font: font.value, config: projectConfig(),
+    project_title: field('project-name').value, asset_ids: assetIds, ...projectScope()};
+}
 const fontExtensions = /\.(ttf|otf|ttc)$/i;
 const sample = `# 第一章　末班车
 $[林岚]
@@ -31,118 +96,418 @@ $[林岚]
 let scenes = [];
 let selectedLine = null;
 let inspectedText = null;
+let previewedAsset = null;
+const pipeline = field('pipeline');
+let pipelineSummaries = {};
+let pipelineAvailableSnapshots = {};
+let nodeInputs = [];
 
 function message(text, isError = false) {
-  status.textContent = text;
+  status.textContent = text || '就绪';
+  status.title = status.textContent;
   status.classList.toggle('error', isError);
   status.setAttribute('role', isError ? 'alert' : 'status');
 }
 
-function updatePipeline() {
-  const rawLength = raw.value.trim().length;
-  const fresh = Boolean(scenario.value.trim() && inspectedText === scenario.value);
-  const lineCount = scenes.reduce((total, scene) => total + scene.lines.length, 0);
-  const speakerCount = new Set(scenes.flatMap((scene) => scene.lines.map((line) => line.speaker).filter(Boolean))).size;
-  const unresolved = scenes.reduce((total, scene) => total + scene.lines.filter((line) => line.speaker === '？').length, 0);
-  let cueCount = 0;
-  const references = new Set();
-  let cueError = false;
-  try {
-    const plan = mapping(cues.value, '演出 JSON');
-    for (const scene of Object.values(plan)) {
-      if (!scene || typeof scene !== 'object' || Array.isArray(scene)) continue;
-      for (const commands of Object.values(scene)) {
-        if (!Array.isArray(commands)) continue;
-        for (const command of commands) {
-          if (!command || typeof command !== 'object' || Array.isArray(command)) continue;
-          cueCount += 1;
-          for (const [kind, value] of Object.entries(command)) {
-            const name = kind === 'show' ? value?.file : value;
-            if (['background', 'show', 'music', 'sound', 'voice'].includes(kind) && typeof name === 'string') references.add(name);
+function editorFingerprint() {
+  return JSON.stringify([
+    field('project-name').value, raw.value, scenario.value, cues.value, font.value,
+    projectConfigIds.map((id) => {
+      const control = field(id);
+      return control instanceof HTMLInputElement && control.type === 'checkbox' ? control.checked : control.value;
+    }),
+    field('heading').value, field('speakers').value,
+    [...uploads].map(([name, file]) => [name, managedAssets.get(file)]),
+  ]);
+}
+
+function projectConfig() {
+  const width = field('project-width').valueAsNumber;
+  const height = field('project-height').valueAsNumber;
+  if (!Number.isInteger(width) || width < 640 || width > 7680
+      || !Number.isInteger(height) || height < 360 || height > 4320) {
+    throw new Error('项目分辨率须为整数，宽度 640–7680，高度 360–4320。');
+  }
+  const value = (id) => field(id).value;
+  const number = (id) => field(id).valueAsNumber;
+  const seed = (id) => value(id) === '' ? null : number(id);
+  const readLlmSettings = (prefix) => ({
+    mode: value(`${prefix}mode`), base_url: value(`${prefix}url`).trim(), model: value(`${prefix}model`).trim(),
+    temperature: number(`${prefix}temperature`), max_tokens: number(`${prefix}tokens`),
+    timeout: number(`${prefix}timeout`), system_prompt: value(`${prefix}system`),
+  });
+  const llm = readLlmSettings('config-llm-');
+  const scenarioLlm = readLlmSettings('config-llm-scenario-');
+  const config = {
+    resolution: {width, height},
+    llm,
+    llm_overrides: {scenario: {enabled: field('config-llm-scenario-enabled').checked,
+      settings: scenarioLlmOverrideInitialized ? scenarioLlm : {}}},
+    generation: {mode: value('config-image-mode'), base_model: value('config-image-base'),
+      lora: value('config-image-lora'), compare: value('config-image-compare'), weight: number('config-image-weight'),
+      size: value('config-image-size'), seed: seed('config-image-seed'), sampler: value('config-image-sampler'),
+      steps: number('config-image-steps'), cfg: number('config-image-cfg'), count: number('config-image-count'),
+      negative: value('config-image-negative'), online_model: value('config-image-online-model'),
+      online_size: value('config-image-online-size'), quality: value('config-image-quality')},
+    training: {base_model: value('config-train-base'), dataset: value('config-train-dataset'),
+      parent: value('config-train-parent'), name: value('config-train-name'), steps: number('config-train-steps'),
+      save_every: number('config-train-save'), rank: number('config-train-rank'), lr: number('config-train-lr'),
+      repeats: number('config-train-repeats'), seed: number('config-train-seed')},
+    prompts: {style: value('config-prompt-style'), negative: value('config-prompt-negative')},
+  };
+  const {generation, training, prompts} = config;
+  const numericValid = (number, min, max, integer = false) => Number.isFinite(number)
+    && number >= min && number <= max && (!integer || Number.isInteger(number));
+  validateLlmConfig(llm, '项目全局 LLM', numericValid);
+  if (config.llm_overrides.scenario.enabled) {
+    validateLlmConfig({...llm, ...scenarioLlm}, 'Scenario LLM Override', numericValid);
+  }
+  if (!numericValid(generation.weight, 0.05, 1.5) || !numericValid(generation.steps, 1, 60, true)
+      || !numericValid(generation.cfg, 1, 15) || !numericValid(generation.count, 1, 4, true)
+      || (generation.seed !== null && !numericValid(generation.seed, 0, 2147483644, true))) {
+    throw new Error('图像生成参数超出有效范围。');
+  }
+  if (!numericValid(training.steps, 1, 5000, true) || !numericValid(training.save_every, 1, 5000, true)
+      || !numericValid(training.rank, 2, 64, true) || !numericValid(training.lr, 0.000001, 0.001)
+      || !numericValid(training.repeats, 1, 50, true) || !numericValid(training.seed, 0, 2147483647, true)) {
+    throw new Error('LoRA 训练参数超出有效范围。');
+  }
+  if (prompts.style.length > 2000 || prompts.negative.length > 2000 || generation.negative.length > 4000) {
+    throw new Error('提示词内容超过长度限制。');
+  }
+  return config;
+}
+
+function validateLlmConfig(llm, label, numericValid) {
+  if (!['rules', 'openai-compatible'].includes(llm.mode)
+      || (llm.mode === 'openai-compatible' && (!llm.base_url || !llm.model))) {
+    throw new Error(`${label}模式、API 地址和模型名称需要配置完整。`);
+  }
+  if (llm.mode === 'openai-compatible') {
+    let endpoint;
+    try { endpoint = new URL(llm.base_url); } catch { endpoint = null; }
+    if (!endpoint || !['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) {
+      throw new Error(`${label} API 地址须为不含账号密码的 HTTP(S) 地址。`);
+    }
+  }
+  if (!numericValid(llm.temperature, 0, 2) || !numericValid(llm.max_tokens, 128, 32768, true)
+      || !numericValid(llm.timeout, 30, 600, true) || !llm.system_prompt.trim() || llm.system_prompt.length > 6000) {
+    throw new Error(`${label} Temperature、Token 上限、请求超时或系统提示词无效。`);
+  }
+}
+
+function copyGlobalLlmToScenarioOverride() {
+  for (const [key, suffix] of Object.entries(llmSettingSuffixes)) {
+    field(`config-llm-scenario-${suffix}`).value = field(`config-llm-${suffix}`).value;
+  }
+}
+
+function updateScenarioLlmOverrideUi() {
+  const enabled = field('config-llm-scenario-enabled').checked;
+  const controls = field('config-llm-scenario-fields');
+  controls.hidden = !enabled;
+  controls.querySelectorAll('input, select, textarea').forEach((control) => { control.disabled = !enabled; });
+}
+
+function applyProjectConfig(config = {}) {
+  const defaults = {
+    resolution: {width: 1280, height: 720},
+    llm: {mode: 'rules', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', temperature: 0.2,
+      max_tokens: 4096, timeout: 180, system_prompt: field('config-llm-system').defaultValue},
+    generation: {mode: 'local', base_model: '', lora: '', compare: 'none', weight: 0.35, size: '512x896',
+      seed: null, sampler: 'euler_a', steps: 20, cfg: 6.5, count: 1,
+      negative: field('config-image-negative').defaultValue, online_model: '', online_size: '1024x1536', quality: 'medium'},
+    training: {base_model: '', dataset: '', parent: '', name: 'prisma_style_next', steps: 200,
+      save_every: 100, rank: 4, lr: 0.0001, repeats: 10, seed: 1065270805},
+    prompts: {style: field('config-prompt-style').defaultValue, negative: field('config-prompt-negative').defaultValue},
+    llm_overrides: {scenario: {enabled: false, settings: {}}},
+  };
+  const merged = Object.fromEntries(Object.entries(defaults).map(([key, base]) => [key, {...base, ...(config[key] || {})}]));
+  const set = (id, value) => {
+    const element = field(id);
+    const normalized = value == null ? '' : String(value);
+    if (element instanceof HTMLSelectElement && normalized && ![...element.options].some((option) => option.value === normalized)) {
+      element.add(new Option(normalized, normalized));
+    }
+    element.value = normalized;
+  };
+  set('project-width', merged.resolution.width);
+  set('project-height', merged.resolution.height);
+  const groups = {llm: 'config-llm-', generation: 'config-image-', training: 'config-train-', prompts: 'config-prompt-'};
+  for (const [group, prefix] of Object.entries(groups)) {
+    const keys = group === 'llm' ? {mode: 'mode', base_url: 'url', model: 'model', temperature: 'temperature',
+      max_tokens: 'tokens', timeout: 'timeout', system_prompt: 'system'}
+      : group === 'generation' ? {mode: 'mode', base_model: 'base', lora: 'lora', compare: 'compare', weight: 'weight',
+        size: 'size', seed: 'seed', sampler: 'sampler', steps: 'steps', cfg: 'cfg', count: 'count', negative: 'negative',
+        online_model: 'online-model', online_size: 'online-size', quality: 'quality'}
+      : group === 'training' ? {base_model: 'base', dataset: 'dataset', parent: 'parent', name: 'name', steps: 'steps',
+        save_every: 'save', rank: 'rank', lr: 'lr', repeats: 'repeats', seed: 'seed'}
+      : {style: 'style', negative: 'negative'};
+    for (const [key, suffix] of Object.entries(keys)) set(prefix + suffix, merged[group][key]);
+  }
+  const scenarioOverride = merged.llm_overrides.scenario || {};
+  const scenarioSettings = {...merged.llm, ...(scenarioOverride.settings || {})};
+  set('config-llm-scenario-enabled', scenarioOverride.enabled === true);
+  for (const [key, suffix] of Object.entries(llmSettingSuffixes)) {
+    set(`config-llm-scenario-${suffix}`, scenarioSettings[key]);
+  }
+  scenarioLlmOverrideInitialized = Object.keys(scenarioOverride.settings || {}).length > 0;
+  if (field('config-llm-scenario-enabled').checked && !scenarioLlmOverrideInitialized) {
+    copyGlobalLlmToScenarioOverride();
+    scenarioLlmOverrideInitialized = true;
+  }
+  updateScenarioLlmOverrideUi();
+}
+
+function projectHasEdits() {
+  return editorBaseline !== null && editorFingerprint() !== editorBaseline;
+}
+
+function allowProjectSwitch() {
+  return true;
+}
+
+function cueReferences(plan) {
+  let count = 0;
+  const names = new Set(font.value ? [font.value] : []);
+  for (const scene of Object.values(plan)) {
+    if (!scene || typeof scene !== 'object' || Array.isArray(scene)) throw new Error('每组演出绑定须为 JSON 对象。');
+    for (const commands of Object.values(scene)) {
+      if (!Array.isArray(commands)) throw new Error('每个文本条目的演出动作须为数组。');
+      for (const cue of commands) {
+        if (!cue || typeof cue !== 'object' || Array.isArray(cue)) throw new Error('每个演出动作须为对象。');
+        count++;
+        for (const [kind, value] of Object.entries(cue)) {
+          const name = kind === 'show' ? value?.file : value;
+          if (['background', 'show', 'music', 'sound', 'voice'].includes(kind) && typeof name === 'string') {
+            names.add(name);
           }
         }
       }
     }
-  } catch {
-    cueError = true;
   }
-  const mediaCount = uploads.size;
-  const voiceCount = [...uploads.keys()].filter((name) => audioExtensions.test(name)).length;
-  const candidateCount = field('image-gallery')?.querySelectorAll('figure').length ?? 0;
-  const set = (id, value) => {
-    const node = field(id);
-    if (node) node.textContent = value;
-    document.querySelectorAll(`[data-flow-id="${id}"]`).forEach((item) => { item.textContent = value; });
-  };
-
-  set('flow-raw-state', rawLength ? '已载入' : '等待原文');
-  set('flow-raw-value', rawLength ? `${rawLength.toLocaleString()} 字 · 另带起始章节与说话人映射` : '原文 + 章节起点 + 说话人映射');
-  set('flow-scenario-state', fresh ? `${scenes.length} 场已解析` : scenario.value.trim() ? '待解析 / 有修改' : '等待生成');
-  set('flow-scenario-value', fresh ? `${scenes.length} 场 · ${lineCount} 条台词 · ${speakerCount} 个说话人` : '章节 → 场景 ID → 有序台词与说话人');
-  set('flow-script-state', cueError ? '演出 JSON 有误' : fresh ? `${cueCount} 个动作` : '等待解析');
-  set('flow-script-value', fresh ? `${cueCount} 个动作 · ${references.size} 个文件引用 · 已添加 ${mediaCount} 个文件` : 'Scenario + cue JSON + 实际引用文件');
-  set('flow-export-state', exported ? '已生成并下载' : fresh ? '可构建' : '尚未导出');
-  set('flow-background-state', candidateCount ? `${candidateCount} 张候选` : '候选可生成');
-  set('flow-sprite-state', candidateCount ? `${candidateCount} 张候选` : '可生成候选');
-  set('flow-cg-state', candidateCount ? `${candidateCount} 张候选` : '可生成候选');
-  set('flow-voice-state', voiceCount ? `${voiceCount} 个音频文件` : '可手动挂接');
-
-  const selected = selectedPipelineNode && document.querySelector(`.flow-node[data-node="${selectedPipelineNode}"]`);
-  if (!selected) return;
-  const states = {
-    raw: rawLength ? '已载入' : '等待原文',
-    scenario: fresh ? `${scenes.length} 场已解析` : scenario.value.trim() ? '待解析 / 有修改' : '等待生成',
-    script: cueError ? '演出 JSON 有误' : fresh ? `${cueCount} 个动作` : '等待解析',
-    'background-assets': candidateCount ? `${candidateCount} 张候选图` : '候选可生成',
-    'sprite-assets': candidateCount ? `${candidateCount} 张候选图` : '可生成候选',
-    'cg-assets': candidateCount ? `${candidateCount} 张候选图` : '可生成候选',
-    'voice-assets': voiceCount ? `${voiceCount} 个音频文件` : '可手动挂接',
-    'music-reference': '参考输入',
-    'character-reference': '参考输入',
-    'voice-reference': '参考输入',
-  };
-  set('flow-detail-title', selected.dataset.title);
-  const detailState = field('flow-detail-state');
-  detailState.textContent = states[selectedPipelineNode] || selected.querySelector('.node-state')?.textContent || '规划中';
-  detailState.className = `node-state${selected.classList.contains('is-plan') ? ' is-plan' : selected.classList.contains('is-partial') ? ' is-partial' : selected.classList.contains('is-reference') ? ' is-reference' : ''}`;
-  set('flow-detail-input', selected.dataset.input || '—');
-  set('flow-detail-handoff', selected.dataset.handoff || '—');
-  set('flow-detail-output', selected.dataset.output || '—');
-  const current = {
-    raw: rawLength ? `当前输入：${rawLength.toLocaleString()} 字。` : '当前输入：尚未载入原文。',
-    scenario: fresh ? `当前输出：${scenes.length} 场、${lineCount} 条台词、${speakerCount} 个说话人；${unresolved} 条说话人待确认。` : scenario.value.trim() ? '当前输出：Scenario 已有内容，解析结果未生成或已过期。' : '当前输出：尚未生成 Scenario。',
-    script: cueError ? '当前状态：演出 JSON 解析失败，无法构建。' : `当前传递：${cueCount} 个演出动作、${references.size} 个文件引用；素材区已有 ${mediaCount} 个文件。${[...references].some((name) => !uploads.has(name)) ? '有引用文件尚未加入。' : ''}`,
-    'background-assets': `当前传递：图像工作室有 ${candidateCount} 张候选；需要手动加入素材，再在演出中绑定。`,
-    'sprite-assets': `当前传递：图像工作室有 ${candidateCount} 张候选；立绘差分尚未自动继承角色基准立绘。`,
-    'cg-assets': `当前传递：图像工作室有 ${candidateCount} 张候选；CG 尚未自动继承角色基准立绘。`,
-    'voice-assets': `当前传递：素材区有 ${voiceCount} 个音频文件，Scenario 与 cue 编辑器可手动绑定已录制的语音。`,
-    'music-reference': '当前状态：拓扑定义了音乐参考入口；参考素材的导入与归档控件尚未接入。',
-    'character-reference': '当前状态：拓扑定义了角色参考入口；参考素材的导入与归档控件尚未接入。',
-    'voice-reference': '当前状态：拓扑定义了人声参考入口；参考素材的导入与归档控件尚未接入。',
-  };
-  set('flow-detail-current', current[selectedPipelineNode] || '该分支目前标记为规划中，输入、交接字段和下游用途按制作关系表展示。');
-  const link = field('flow-detail-link');
-  link.hidden = !selected.dataset.target;
-  if (selected.dataset.target) link.href = selected.dataset.target;
+  return {count, names};
 }
 
-document.querySelectorAll('.flow-node').forEach((node) => node.addEventListener('click', () => {
-  document.querySelectorAll('.flow-node[aria-pressed="true"]').forEach((active) => active.setAttribute('aria-pressed', 'false'));
-  selectedPipelineNode = node.dataset.node;
-  document.querySelectorAll(`.flow-node[data-node="${selectedPipelineNode}"]`).forEach((match) => match.setAttribute('aria-pressed', 'true'));
-  document.querySelectorAll('.pipeline-edge').forEach((edge) => {
-    edge.classList.toggle('is-related', edge.dataset.from === selectedPipelineNode || edge.dataset.to === selectedPipelineNode);
+function enablePipelinePanning() {
+  const viewport = pipeline.querySelector('.flow-graph-scroll');
+  let pan = null;
+
+  viewport.addEventListener('pointerdown', (event) => {
+    if (event.pointerType !== 'mouse' || event.button !== 0 || !event.target.closest('.flow-graph')) return;
+    pan = {id: event.pointerId, x: event.clientX, y: event.clientY,
+      left: viewport.scrollLeft, top: viewport.scrollTop, dragging: false};
   });
-  updatePipeline();
-}));
-document.querySelectorAll('.route-step[data-target]').forEach((step) => step.addEventListener('click', () => {
-  document.querySelector(step.dataset.target)?.scrollIntoView({behavior: 'smooth', block: 'start'});
-}));
-document.querySelectorAll('#flow-detail-link, .pipeline-heading .section-link').forEach((link) => link.addEventListener('click', (event) => {
-  event.preventDefault();
-  document.querySelector(link.getAttribute('href'))?.scrollIntoView({behavior: 'smooth', block: 'start'});
-}));
-if (field('image-gallery')) new MutationObserver(updatePipeline).observe(field('image-gallery'), {childList: true, subtree: true});
+
+  viewport.addEventListener('pointermove', (event) => {
+    if (!pan || event.pointerId !== pan.id || !(event.buttons & 1)) return;
+    const dx = event.clientX - pan.x;
+    const dy = event.clientY - pan.y;
+    if (!pan.dragging) {
+      if (Math.hypot(dx, dy) < 5) return;
+      // Capturing after the threshold keeps ordinary button clicks on their nodes.
+      viewport.setPointerCapture(event.pointerId);
+      pan.dragging = true;
+      viewport.classList.add('is-panning');
+    }
+    viewport.scrollLeft = pan.left - dx;
+    viewport.scrollTop = pan.top - dy;
+  });
+
+  function finishPan(event) {
+    if (event.pointerId !== pan?.id) return;
+    pan = null;
+    viewport.classList.remove('is-panning');
+  }
+
+  viewport.addEventListener('pointerup', finishPan);
+  viewport.addEventListener('pointercancel', finishPan);
+  viewport.addEventListener('lostpointercapture', finishPan);
+  viewport.addEventListener('pointerleave', (event) => {
+    if (!pan?.dragging) finishPan(event);
+  });
+}
+
+function updatePipelineStatus({hasScenario, details, error, missing, ready}) {
+  const rawLength = raw.value.trim().length;
+  const lines = scenes.flatMap((scene) => scene.lines);
+  const speakers = new Set(lines.map((line) => line.speaker).filter((speaker) => speaker && speaker !== '？'));
+  const unresolved = lines.filter((line) => line.speaker === '？').length;
+  const cueCount = details?.count ?? 0;
+  const referenceCount = details?.names.size ?? 0;
+  const candidates = field('image-gallery').querySelectorAll('figure').length;
+  const sceneSummary = `${scenes.length} 场 · ${lines.length} 条台词 · ${speakers.size} 个说话人`;
+  pipelineSummaries = {
+    source: rawLength ? `已载入 ${rawLength.toLocaleString()} 字原文。` : '尚未载入原文。',
+    scenario: hasScenario ? `${sceneSummary}。有 ${unresolved} 条说话人待确认。` : '尚未生成 Scenario。',
+    candidates: candidates ? `当前查看的任务有 ${candidates} 张候选图。` : '',
+    assets: `素材列表中有 ${uploads.size} 个文件。`,
+    cues: error || `${cueCount} 个动作引用 ${referenceCount} 个文件。${missing.length ? `有 ${missing.length} 个引用文件尚未加入。` : ''}`,
+    export: exported ? '已生成并下载。' : unresolved ? `还有 ${unresolved} 条对白需要确认说话人。`
+      : ready ? '可构建工程。' : '尚未导出。',
+  };
+  pipelineAvailableSnapshots = {source: rawLength > 0, scenario: hasScenario, assets: uploads.size > 0, cues: cueCount > 0};
+  document.dispatchEvent(new Event('prisma-pipeline-activity'));
+}
+
+function updateWorkspaceStatus() {
+  const dirty = projectHasEdits();
+  field('project-write').hidden = !openProject;
+  field('project-write').disabled = !dirty || projectWriteInFlight;
+  field('project-undo').hidden = !openProject;
+  field('project-history-open').hidden = !openProject;
+  field('project-undo').disabled = projectHistoryItems.length < 2 || projectWriteInFlight;
+  field('project-keep').hidden = Boolean(openProject) || !dirty;
+  const saveState = field('project-write-state');
+  saveState.classList.toggle('is-dirty', dirty);
+  saveState.textContent = openProject
+    ? projectWriteInFlight ? '正在写入…' : dirty ? '等待自动写入' : '已自动写入'
+    : dirty ? '当前内容还未加入项目' : '';
+  let configError = '';
+  try { projectConfig(); } catch (error) { configError = error.message; }
+  field('project-config-error').textContent = configError;
+  field('project-config-error').hidden = !configError;
+
+  let details;
+  let error = '';
+  try { details = cueReferences(mapping(cues.value, '演出 JSON')); }
+  catch (cause) { error = cause.message; }
+  const missing = details ? [...details.names].filter((name) => !managedAssets.get(uploads.get(name))) : [];
+  const hasScenario = Boolean(scenario.value);
+  const scriptRef = nodeInputs.find((item) => item.kind === 'script');
+  const exportStage = location.hash === '#stage-export';
+  const ready = exportStage ? Boolean(scriptRef) : hasScenario && !error && !missing.length;
+  updatePipelineStatus({hasScenario, details, error, missing, ready});
+  const row = (label, text, link) => {
+    const item = document.createElement('li');
+    const key = document.createElement('strong');
+    key.textContent = label;
+    item.append(key, document.createTextNode(text));
+    if (link) {
+      const action = document.createElement('a');
+      action.href = link;
+      action.textContent = '前往处理';
+      item.append(action);
+    }
+    return item;
+  };
+  field('export-state').textContent = exported ? '已下载工程。' : ready ? '可以导出。' : '请先处理下列项目。';
+  field('export-checklist').replaceChildren(
+    row('剧本', scenario.value ? `${scenes.length} 场` : '尚未生成或导入', scenario.value ? '' : '#script-editor'),
+    row('演出', error || `${details?.count ?? 0} 个动作`, error ? '#cue-panel' : ''),
+    row('素材', missing.length ? `缺少 ${missing.join('、')}` : `${details?.names.size ?? 0} 个引用`, missing.length ? '#stage-assets' : ''),
+  );
+  if (exportStage) field('export-checklist').replaceChildren(row('脚本版本',
+    scriptRef ? `已通过 · ${scriptRef.id.slice(0, 10)}` : '请先通过脚本版本', scriptRef ? '' : '#stage-script'));
+  field('build').disabled = !ready || field('build').dataset.busy === 'true';
+  scheduleProjectWrite(Boolean(configError));
+}
+
+function scheduleProjectWrite(invalidConfig = false) {
+  clearTimeout(projectWriteTimer);
+  if (!openProject || !projectHasEdits() || invalidConfig || projectWriteInFlight
+      || failedWriteFingerprint === editorFingerprint()) return;
+  projectWriteTimer = setTimeout(async () => {
+    projectWriteInFlight = true;
+    updateWorkspaceStatus();
+    const attemptFingerprint = editorFingerprint();
+    projectWritePromise = (async () => {
+      try {
+        await saveProject();
+        failedWriteFingerprint = null;
+      } catch (error) {
+        failedWriteFingerprint = attemptFingerprint;
+        message(`自动写入失败：${error.message}`, true);
+        field('project-write-state').textContent = '自动写入失败';
+        field('project-write-state').classList.add('is-dirty');
+      } finally {
+        projectWriteInFlight = false;
+        updateWorkspaceStatus();
+      }
+    })();
+    await projectWritePromise;
+  }, 1500);
+}
+
+async function flushProjectWrite() {
+  clearTimeout(projectWriteTimer);
+  while (projectWriteInFlight) await projectWritePromise;
+  clearTimeout(projectWriteTimer);
+  if (openProject && projectHasEdits()) {
+    projectWriteInFlight = true;
+    updateWorkspaceStatus();
+    try { await saveProject(); }
+    finally {
+      projectWriteInFlight = false;
+      updateWorkspaceStatus();
+    }
+  }
+}
+
+function workspaceView() {
+  const hash = location.hash.slice(1);
+  let id;
+  try { id = decodeURIComponent(hash); }
+  catch { id = ''; }
+  const stage = /^stage-([a-z][a-z0-9-]*)$/.exec(id);
+  document.dispatchEvent(new CustomEvent('prisma-before-view-change', {detail: stage?.[1] || null}));
+  let target = field(stage ? 'pipeline-stage' : id || 'projects');
+  let view = target?.closest('[data-workspace-view]') || field('projects');
+  // Every production surface is part of an opened project. The project library
+  // is the only workspace available without a project context.
+  if (view.id !== 'project-manager' && !openProject) {
+    view = field('project-manager');
+    target = view;
+    if (location.hash !== '#project-manager') history.replaceState(null, '', '#project-manager');
+  }
+  document.querySelectorAll('[data-workspace-view]').forEach((panel) => { panel.hidden = panel !== view; });
+  const activeTab = view.id === 'pipeline-stage' ? id : view.id;
+  document.querySelectorAll('.workspace-nav a').forEach((link) => {
+    if (link.hash === `#${activeTab}`) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  });
+  const sidebar = document.querySelector('.workspace-sidebar');
+  if (sidebar.scrollWidth > sidebar.clientWidth) {
+    const activeLink = sidebar.querySelector('[aria-current="page"]');
+    if (activeLink) {
+      const viewport = sidebar.getBoundingClientRect();
+      const item = activeLink.getBoundingClientRect();
+      if (item.left < viewport.left || item.right > viewport.right) {
+        sidebar.scrollLeft += item.left - viewport.left - 8;
+      }
+    }
+  }
+  document.querySelectorAll('.config-nav a').forEach((link) => {
+    if (link.hash === `#${target?.id}`) link.setAttribute('aria-current', 'location');
+    else link.removeAttribute('aria-current');
+  });
+  updateWorkspaceTitle(view);
+  field('workspace-map-link').hidden = ['projects', 'project-manager', 'pipeline-stage'].includes(view.id);
+  if (stage && openProject) document.dispatchEvent(new CustomEvent('prisma-stage-change', {detail: stage[1]}));
+  if (target && target !== view && target.id !== 'pipeline') {
+    const disclosure = target.closest('details');
+    if (disclosure) disclosure.open = true;
+    target.scrollIntoView({block: 'start', inline: 'nearest'});
+  } else field('workspace-content').scrollTo(0, 0);
+  document.dispatchEvent(new CustomEvent('prisma-view-change', {detail: view.id}));
+}
+
+function goWorkspace(id) {
+  const target = field(id);
+  if (target && !field('pipeline-stage').hidden && field('stage-tools').contains(target)) {
+    const disclosure = target.closest('details');
+    if (disclosure) disclosure.open = true;
+    target.scrollIntoView({block: 'start', inline: 'nearest'});
+    return;
+  }
+  if (location.hash !== `#${id}`) history.pushState(null, '', `#${id}`);
+  workspaceView();
+}
+
+window.addEventListener('hashchange', workspaceView);
+document.addEventListener('prisma-view-change', (event) => {
+  if (event.detail === 'project-config') refreshProjectLlmStatus();
+});
 
 function mapping(value, name) {
   let result;
@@ -170,15 +535,46 @@ async function request(path, data) {
   return response;
 }
 
+async function approvedNodeInput(kind) {
+  const reference = nodeInputs.find((item) => item.kind === kind);
+  if (!reference) return null;
+  const response = await request('/api/images/library/item', {kind, id: reference.id});
+  return (await response.json()).metadata;
+}
+
+function reportNodeOutput(node, result) {
+  document.dispatchEvent(new CustomEvent('prisma-node-output', {detail: {node, result}}));
+}
+
+async function refreshProjectLlmStatus() {
+  const output = field('config-llm-key-state');
+  try {
+    const response = await request('/api/llm/status', {});
+    const state = await response.json();
+    output.textContent = state.configured
+      ? `服务端已配置 ${state.source}。密钥不会写入项目。`
+      : '服务端未检测到 PRISMA_LLM_API_KEY 或 OPENAI_API_KEY。'
+        + '可在本机兼容服务上留空密钥；远程 API 需要在启动环境设置密钥。';
+    output.classList.toggle('is-ready', state.configured);
+    output.classList.toggle('is-missing', !state.configured);
+  } catch (error) {
+    output.textContent = `无法读取 LLM 服务状态：${error.message}`;
+    output.classList.add('is-missing');
+  }
+}
+
 async function run(button, pending, task) {
   button.disabled = true;
+  button.dataset.busy = 'true';
   message(pending);
   try {
     await task();
   } catch (error) {
     message(error.message, true);
   } finally {
+    delete button.dataset.busy;
     button.disabled = false;
+    updateWorkspaceStatus();
   }
 }
 
@@ -191,11 +587,44 @@ function download(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function renderLines() {
+let scenarioPlacement = null;
+
+function chapterAndScene(document, id) {
+  for (const chapter of document?.chapters || []) {
+    const scene = chapter.scenes.find((item) => item.id === id);
+    if (scene) return {chapter, scene};
+  }
+  return {};
+}
+
+function showScenarioEditor(placement, chapter, line, index = -1, total = 0) {
+  scenarioPlacement = placement;
+  field('scenario-line-form').hidden = !placement;
+  field('open-line-production').hidden = placement !== 'edit';
+  field('scenario-chapter-title').value = chapter?.title || '';
+  field('scenario-speaker').value = line?.speaker || '';
+  field('scenario-line-text').value = line?.text || '';
+  field('scenario-viewpoint').value = line?.viewpoint || '';
+  field('scenario-direction').value = line?.direction || '';
+  field('scenario-source').textContent = line?.source
+    ? `${line.source.kind === 'raw' ? '原文' : '旧版剧本'}第 ${line.source.line} 行` : '';
+  for (const [name, enabled] of [['up', index > 0], ['down', index >= 0 && index < total - 1], ['delete', index >= 0]]) {
+    field(`scenario-line-${name}`).disabled = !enabled;
+  }
+}
+
+function renderLines(selectedId) {
   const list = field('lines');
   list.replaceChildren();
   const scene = scenes[Number(sceneSelect.value)];
+  field('add-scenario-line').disabled = !scene;
+  field('add-scenario-scene').disabled = !scene;
+  field('scene-empty').hidden = Boolean(scene);
+  list.hidden = !scene;
+  showScenarioEditor(null);
   if (!scene) return;
+  const {chapter} = chapterAndScene(scenarioData(), scene.id);
+  let selectedRow;
   scene.lines.forEach((line, index) => {
     const row = document.createElement('button');
     row.type = 'button';
@@ -217,12 +646,38 @@ function renderLines() {
       row.setAttribute('aria-pressed', 'true');
       selectedLine = {scene: scene.id, index: index + 1, speaker: line.speaker, id: line.id};
       if (line.speaker && line.speaker !== '？') field('actor').value = line.speaker;
+      showScenarioEditor('edit', chapter, line, index, scene.lines.length);
       refreshCueForm();
-      updatePipeline();
+      updateWorkspaceStatus();
     });
+    if (line.id === selectedId) selectedRow = row;
     list.append(row);
   });
   list.scrollTop = 0;
+  if (selectedRow) {
+    selectedRow.click();
+    selectedRow.scrollIntoView({block: 'nearest'});
+  }
+}
+
+function showScenario(data, preferredScene, preferredLine) {
+  scenario.value = JSON.stringify(data);
+  scenes = data.chapters.flatMap((chapter) =>
+    chapter.scenes.map((scene) => ({...scene, chapter: chapter.title})));
+  inspectedText = scenario.value;
+  selectedLine = null;
+  exported = false;
+  sceneSelect.replaceChildren(...scenes.map((scene, index) => new Option(`${scene.id} · ${scene.chapter}`, index)));
+  sceneSelect.disabled = false;
+  const active = scenes.findIndex((scene) => scene.id === preferredScene);
+  if (active >= 0) sceneSelect.value = String(active);
+  renderLines(preferredLine);
+  refreshCueForm();
+  const pending = scenes.reduce((total, scene) => total + scene.lines.filter((line) => line.speaker === '？').length, 0);
+  field('scene-summary').textContent = `${data.chapters.length} 章 · ${scenes.length} 场 · ${pending} 条待校对`;
+  updateWorkspaceStatus();
+  document.dispatchEvent(new Event('prisma-editors-change'));
+  reportNodeOutput('scenario', {captureProject: true, label: '当前 Scenario', fingerprint: editorFingerprint()});
 }
 
 function refreshCueForm() {
@@ -253,24 +708,17 @@ function invalidateScenes() {
   field('scene-summary').textContent = '等待解析';
   renderLines();
   refreshCueForm();
-  updatePipeline();
+  updateWorkspaceStatus();
+  document.dispatchEvent(new Event('prisma-editors-change'));
 }
 
-async function inspectScenario(text = scenario.value) {
-  const response = await request('/api/scenes', {scenario: text});
+async function importScenario(input) {
+  const before = scenario.value;
+  const project = openProject?.id;
+  const response = await request('/api/scenes', {scenario: input});
   const data = await response.json();
-  if (scenario.value !== text) return;
-  scenes = data.scenes;
-  inspectedText = text;
-  selectedLine = null;
-  sceneSelect.replaceChildren(...scenes.map((scene, index) => new Option(`${scene.id} · ${scene.chapter}`, index)));
-  sceneSelect.disabled = false;
-  renderLines();
-  refreshCueForm();
-  const pending = scenes.reduce((total, scene) => total + scene.lines.filter((line) => line.speaker === '？').length, 0);
-  field('scene-summary').textContent = `${scenes.length} 场 · ${pending} 条待校对`;
-  message(pending ? `已解析 ${scenes.length} 场。请在 Scenario 中校对 ${pending} 条对白。` : `已解析 ${scenes.length} 场，可以安排演出或直接导出。`);
-  updatePipeline();
+  if (scenario.value !== before || project !== openProject?.id) return;
+  showScenario(data.scenario);
 }
 
 async function readText(file) {
@@ -285,11 +733,13 @@ for (const [id, editor] of [['raw-file', raw], ['scenario-file', scenario], ['cu
     if (editor.value.trim() && (editor !== cues || editor.value.trim() !== '{}') && !confirm('替换编辑框中的文本？')) return;
     try {
       const content = await readText(file);
-      if (editor === cues) mapping(content, '演出 JSON');
-      editor.value = content;
-      if (editor === scenario) { exported = false; invalidateScenes(); }
-      if (editor === cues) exported = false;
-      updatePipeline();
+      if (editor === scenario) {
+        await importScenario(content);
+      } else {
+        if (editor === cues) mapping(content, '演出 JSON');
+        editor.value = content;
+        editor.dispatchEvent(new Event('input'));
+      }
       message(`已导入 ${file.name}。`);
     } catch (error) {
       message(`无法导入 ${file.name}。${error.message}`, true);
@@ -297,64 +747,95 @@ for (const [id, editor] of [['raw-file', raw], ['scenario-file', scenario], ['cu
   });
 }
 
-raw.addEventListener('input', () => { exported = false; updatePipeline(); });
+field('project-raw-file').addEventListener('change', (event) => {
+  const file = event.target.files[0];
+  field('project-raw-file-name').textContent = file ? `将导入：${file.name}` : '暂未选择文件';
+});
+
+field('raw-append-file').addEventListener('change', async (event) => {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  const projectId = openProject?.id;
+  if (!projectId) return message('请先打开项目，再追加原文。', true);
+  try {
+    const content = await readText(file);
+    if (projectId !== openProject?.id) return;
+    const separator = raw.value && !raw.value.endsWith('\n') ? '\n\n' : raw.value ? '\n' : '';
+    raw.value += separator + content;
+    raw.dispatchEvent(new Event('input'));
+    message(`已将「${file.name}」追加到当前项目原文，修改会自动写入历史。${scenario.value ? '现有 Scenario 未改变，如需纳入新增文本请重新生成并检查。' : ''}`);
+  } catch (error) {
+    message(`无法追加 ${file.name}。${error.message}`, true);
+  }
+});
+
+raw.addEventListener('input', () => { exported = false; updateWorkspaceStatus(); });
 field('sample').addEventListener('click', () => {
   if (raw.value.trim() && !confirm('替换原文和说话人映射？')) return;
   raw.value = sample;
   field('heading').value = '';
   field('speakers').value = '{"6": "林岚", "7": "周明"}';
   exported = false;
-  updatePipeline();
-  message('已载入车站样例，点击「生成 Scenario」继续。');
+  updateWorkspaceStatus();
+  goWorkspace('stage-raw');
+  message('已载入车站样例。通过后可在 Scenario 节点生成剧本。');
 });
 
 field('draft').addEventListener('click', (event) => {
-  if (scenario.value.trim() && !confirm('用新草稿替换当前 Scenario？')) return;
+  if (scenario.value.trim() && !event.currentTarget.dataset.stageRetry && !confirm('用新草稿替换当前 Scenario？')) return;
   exported = false;
   run(event.currentTarget, '正在生成 Scenario…', async () => {
     const previous = scenario.value;
+    const project = openProject?.id;
+    const input = await approvedNodeInput('source');
+    if (project !== openProject?.id) return;
     const response = await request('/api/draft', {
-      raw: raw.value,
+      ...projectScope(),
+      config: projectConfig(),
+      raw: input?.text ?? raw.value,
       heading: field('heading').value,
       speakers: mapping(field('speakers').value, '说话人映射'),
-      line_ids: true,
     });
     const result = await response.json();
+    if (project !== openProject?.id) return;
     if (scenario.value !== previous) throw new Error('生成期间 Scenario 已编辑，请重新生成或先下载当前稿。');
-    scenario.value = result.scenario;
-    invalidateScenes();
-    await inspectScenario(result.scenario);
+    showScenario(result.scenario);
+    message(`Scenario 已由${result.engine === 'openai-compatible' ? 'LLM' : '规则解析'}生成。请校对 ${result.pending.length} 条待确认的对白。`);
   });
 });
 
 scenario.addEventListener('input', () => { exported = false; invalidateScenes(); });
-cues.addEventListener('input', () => { exported = false; updatePipeline(); });
-field('inspect').addEventListener('click', (event) => run(event.currentTarget, '正在解析场景…', () => inspectScenario()));
+cues.addEventListener('input', () => {
+  exported = false;
+  updateWorkspaceStatus();
+  reportNodeOutput('cues', {captureProject: true, label: '当前演出绑定', fingerprint: editorFingerprint()});
+});
 field('anchor-scenario').addEventListener('click', (event) => run(event.currentTarget, '正在固定演出位置…', async () => {
   const text = scenario.value;
   const plan = cues.value;
-  const response = await request('/api/scenario/anchor', {scenario: text, cues: plan});
+  if (!text) throw new Error('请先生成或导入 Scenario。');
+  const project = openProject?.id;
+  const response = await request('/api/scenario/anchor', {scenario: scenarioData(), cues: plan, ...projectScope()});
   const result = await response.json();
+  if (project !== openProject?.id) return;
   if (scenario.value !== text || cues.value !== plan) throw new Error('固定期间剧本或演出已编辑，请重试。');
-  scenario.value = result.scenario;
   cues.value = JSON.stringify(result.cues, null, 2);
-  exported = false;
-  invalidateScenes();
-  await inspectScenario(result.scenario);
-  if (inspectedText === result.scenario) message('已固定演出位置。请一同保存 Scenario 和演出 JSON。');
+  showScenario(result.scenario, selectedLine?.scene, selectedLine?.id);
+  message('已固定演出位置。');
 }));
 field('save-scenario').addEventListener('click', (event) => {
   if (!scenario.value.trim()) return message('请先填写 Scenario。', true);
   run(event.currentTarget, '正在保存 Scenario…', async () => {
-    const text = scenario.value;
-    await request('/api/scenario/save', {raw: raw.value, scenario: text});
-    download(new Blob([text], {type: 'text/markdown;charset=utf-8'}), 'scenario.md');
+    const document = scenarioData();
+    await request('/api/scenario/save', {raw: raw.value, scenario: document, ...projectScope()});
+    download(new Blob([JSON.stringify(document, null, 2) + '\n'], {type: 'application/json'}), 'scenario.json');
     message('Scenario 已登记并下载。');
   });
 });
 field('save-cues').addEventListener('click', (event) => run(event.currentTarget, '正在保存演出绑定…', async () => {
   const text = cues.value.trim() || '{}';
-  await request('/api/scenario/save', {scenario: scenario.value, cues: mapping(text, '演出 JSON')});
+  await request('/api/scenario/save', {scenario: scenarioData(), cues: mapping(text, '演出 JSON'), ...projectScope()});
   download(new Blob([text], {type: 'application/json'}), 'cues.json');
   message('演出绑定已登记并下载。');
 }));
@@ -362,8 +843,138 @@ sceneSelect.addEventListener('change', () => {
   selectedLine = null;
   renderLines();
   refreshCueForm();
-  updatePipeline();
+  updateWorkspaceStatus();
 });
+field('open-line-production').onclick = () => {
+  if (!selectedLine) return;
+  goWorkspace('stage-cues');
+  document.dispatchEvent(new CustomEvent('prisma-line-production', {detail: selectedLine.id}));
+};
+
+function startScenarioEntry(placement) {
+  const active = scenes[Number(sceneSelect.value)];
+  const {chapter} = chapterAndScene(scenarioData(), active?.id);
+  showScenarioEditor(placement, placement === 'chapter' ? null : chapter);
+  field(placement === 'chapter' ? 'scenario-chapter-title' : 'scenario-line-text').focus();
+}
+
+for (const placement of ['line', 'scene', 'chapter']) {
+  field(`add-scenario-${placement}`).onclick = () => startScenarioEntry(placement);
+}
+
+async function stableCues(data) {
+  const plan = mapping(cues.value, '演出 JSON');
+  if (Object.keys(plan).every((key) => key === lineCues)) return plan;
+  const original = cues.value;
+  const current = scenario.value;
+  const project = openProject?.id;
+  const response = await request('/api/scenario/anchor', {scenario: data, cues: plan, ...projectScope()});
+  const result = await response.json();
+  if (project !== openProject?.id || cues.value !== original || scenario.value !== current) {
+    throw new Error('编辑期间项目或演出有变化，请重试。');
+  }
+  return result.cues;
+}
+
+field('scenario-line-form').onsubmit = (event) => {
+  event.preventDefault();
+  run(event.submitter, '正在更新剧本…', async () => {
+    const data = scenarioData() || {version: 1, chapters: []};
+    const active = scenes[Number(sceneSelect.value)];
+    const currentSelection = selectedLine;
+    const title = field('scenario-chapter-title').value.trim();
+    const body = field('scenario-line-text').value.trim();
+    if (!title || !body) throw new Error('请填写章节标题和文本。');
+    let {chapter, scene} = chapterAndScene(data, active?.id);
+    if (scenarioPlacement === 'chapter') {
+      const id = String(Math.max(0, ...data.chapters.map((item) => Number(item.id))) + 1);
+      chapter = {id, title, scenes: []};
+      data.chapters.push(chapter);
+    }
+    if (scenarioPlacement === 'chapter' || scenarioPlacement === 'scene') {
+      const number = Math.max(0, ...chapter.scenes.map((item) => Number(item.id.split(':')[1]))) + 1;
+      scene = {id: `${chapter.id}:${number}`, lines: []};
+      chapter.scenes.push(scene);
+    }
+    const placement = scenarioPlacement;
+    const index = scene.lines.findIndex((item) => item.id === currentSelection?.id);
+    const line = placement === 'edit' ? scene.lines[index] : {id: `line-${crypto.randomUUID()}`};
+    line.text = body;
+    line.speaker = field('scenario-speaker').value.trim() || null;
+    for (const key of ['viewpoint', 'direction']) {
+      const value = field(`scenario-${key}`).value.trim();
+      if (value) line[key] = value;
+      else delete line[key];
+    }
+    chapter.title = title;
+    if (placement === 'line') {
+      const plan = await stableCues(scenarioData());
+      cues.value = JSON.stringify(plan, null, 2);
+    }
+    if (placement !== 'edit') scene.lines.splice(index < 0 ? scene.lines.length : index + 1, 0, line);
+    showScenario(data, scene.id, line.id);
+    message('Scenario 已更新。');
+  });
+};
+
+for (const [name, step] of [['up', -1], ['down', 1], ['delete', 0]]) {
+  field(`scenario-line-${name}`).onclick = (event) => run(event.currentTarget, '正在调整台词…', async () => {
+    if (!selectedLine) return;
+    const data = scenarioData();
+    const {chapter, scene} = chapterAndScene(data, selectedLine.scene);
+    const id = selectedLine.id;
+    const index = scene.lines.findIndex((item) => item.id === id);
+    if (index < 0) return;
+    const plan = await stableCues(data);
+    if (step) {
+      const target = index + step;
+      if (target < 0 || target >= scene.lines.length) return;
+      [scene.lines[index], scene.lines[target]] = [scene.lines[target], scene.lines[index]];
+    } else {
+      if (data.chapters.length === 1 && chapter.scenes.length === 1 && scene.lines.length === 1) {
+        throw new Error('剧本至少需要一条文本。');
+      }
+      if (plan[lineCues]?.[id]?.length && !confirm('同时删除这条文本的演出绑定？')) return;
+      if (plan[lineCues]) delete plan[lineCues][id];
+      scene.lines.splice(index, 1);
+      if (!scene.lines.length) chapter.scenes = chapter.scenes.filter((item) => item.id !== scene.id);
+      if (!chapter.scenes.length) data.chapters = data.chapters.filter((item) => item.id !== chapter.id);
+    }
+    cues.value = JSON.stringify(plan, null, 2);
+    showScenario(data, scene.id, step ? id : scene.lines[index]?.id ?? scene.lines.at(-1)?.id);
+  });
+}
+
+function previewProjectAsset(name) {
+  previewedAsset = uploads.has(name) ? name : null;
+  const preview = field('asset-preview');
+  preview.replaceChildren();
+  for (const button of field('file-list').querySelectorAll('[data-asset-name]')) {
+    button.setAttribute('aria-pressed', String(button.dataset.assetName === previewedAsset));
+  }
+  const title = document.createElement('p');
+  title.textContent = previewedAsset || '选择一个素材查看。';
+  preview.append(title);
+  if (!previewedAsset) return;
+  const id = managedAssets.get(uploads.get(name));
+  if (!id) return;
+  if (imageExtensions.test(name) || audioExtensions.test(name)) {
+    const media = document.createElement(imageExtensions.test(name) ? 'img' : 'audio');
+    if (media.tagName === 'IMG') media.alt = name;
+    else {
+      media.controls = true;
+      media.preload = 'none';
+      media.setAttribute('aria-label', name);
+    }
+    media.src = `/api/workspace/assets/${encodeURIComponent(id)}?preview=1`;
+    preview.append(media);
+  }
+  const link = document.createElement('a');
+  link.href = `/api/workspace/assets/${encodeURIComponent(id)}`;
+  link.download = name;
+  link.textContent = '下载原文件';
+  preview.append(link);
+}
 
 function renderFiles() {
   exported = false;
@@ -372,25 +983,41 @@ function renderFiles() {
   const selectedFont = font.value;
   font.replaceChildren(new Option('Ren’Py 默认', ''));
   for (const name of uploads.keys()) {
+    const row = document.createElement('div');
+    row.className = 'asset-row';
+    const select = document.createElement('button');
+    select.type = 'button';
+    select.dataset.assetName = name;
+    select.textContent = name;
+    select.onclick = () => previewProjectAsset(name);
+    const type = document.createElement('span');
+    type.textContent = imageExtensions.test(name) ? '图片' : audioExtensions.test(name) ? '音频' : '字体';
     const remove = document.createElement('button');
     remove.type = 'button';
-    remove.textContent = `${name} ×`;
-    remove.setAttribute('aria-label', `移除 ${name}`);
+    remove.textContent = '移出';
+    remove.setAttribute('aria-label', `移出 ${name}`);
     remove.addEventListener('click', () => {
       uploads.delete(name);
       renderFiles();
     });
-    list.append(remove);
+    row.append(select, type, remove);
+    list.append(row);
     if (fontExtensions.test(name)) font.add(new Option(name, name));
   }
-  if (!uploads.size) list.textContent = '可添加图片、音频和字体。素材文件按名称引用。';
+  if (!uploads.size) list.textContent = '当前还没有素材。可上传文件，或从下方资源目录加入。';
+  previewProjectAsset(previewedAsset);
   if (uploads.has(selectedFont)) font.value = selectedFont;
   refreshCueForm();
-  updatePipeline();
+  updateWorkspaceStatus();
+  document.dispatchEvent(new Event('prisma-assets-change'));
+  const stage = field('pipeline-stage');
+  if (!stage.hidden && stage.dataset.node === 'assets') {
+    reportNodeOutput('assets', {captureProject: true, label: '当前项目素材', fingerprint: editorFingerprint()});
+  }
 }
 
-async function registerMedia(name, data) {
-  const response = await request('/api/workspace/assets/import', {name, ...data});
+async function registerMedia(name, data, scope = projectScope()) {
+  const response = await request('/api/workspace/assets/import', {name, ...data, ...scope});
   return response.json();
 }
 
@@ -404,11 +1031,13 @@ field('files').addEventListener('change', async (event) => {
   event.target.value = '';
   const duplicate = files.find((file) => uploads.has(file.name));
   if (duplicate && !confirm(`替换已添加的同名素材，例如 ${duplicate.name}？`)) return;
+  const scope = projectScope();
   event.target.disabled = true;
   try {
     for (const file of files) {
       if (file.size > 45 * 1024 * 1024) throw new Error(`素材「${file.name}」超过 45 MiB。`);
-      const resource = await registerMedia(file.name, {data: await encode(file)});
+      const resource = await registerMedia(file.name, {data: await encode(file)}, scope);
+      if (scope.project_id !== openProject?.id) return;
       useManagedMedia(file.name, resource.id, file);
     }
     if (files.length) message('素材已登记到资源目录。');
@@ -416,24 +1045,175 @@ field('files').addEventListener('change', async (event) => {
   finally { renderFiles(); event.target.disabled = false; }
 });
 
+let showProjectTrash = false;
+let projectPageOffset = 0;
+let projectListRequest = 0;
+
 async function refreshProjects() {
-  const response = await request('/api/images/library/list', {kind: 'project', limit: 100});
-  const {items} = await response.json();
-  const select = field('project-select');
-  const selected = openProject?.id || select.value;
-  select.replaceChildren(new Option('选择项目', ''), ...items.map((item) => new Option(item.label, item.id)));
-  select.value = selected;
+  const sequence = ++projectListRequest;
+  const trash = showProjectTrash;
+  const response = await request('/api/workspace/project/list', {trash, offset: projectPageOffset});
+  const {items, total, limit} = await response.json();
+  if (sequence !== projectListRequest) return;
+  if (!items.length && projectPageOffset) {
+    projectPageOffset = Math.max(0, projectPageOffset - limit);
+    return refreshProjects();
+  }
+  const list = field('project-list');
+  list.replaceChildren();
+  for (const item of items) {
+    const card = document.createElement('article');
+    card.className = 'project-card';
+    card.classList.toggle('is-current', item.id === openProject?.id);
+    const open = document.createElement(trash ? 'div' : 'button');
+    open.className = 'project-card-open';
+    if (!trash) {
+      open.type = 'button';
+      open.setAttribute('aria-label', `打开项目「${item.label}」`);
+    }
+    const top = document.createElement('span');
+    top.className = 'project-card-top';
+    const icon = document.createElement('span');
+    icon.className = 'project-card-icon';
+    icon.append(uiIcon('folder'));
+    top.append(icon);
+    if (item.id === openProject?.id) {
+      const current = document.createElement('span');
+      current.className = 'project-card-current';
+      current.textContent = '当前项目';
+      top.append(current);
+    }
+    const title = document.createElement('strong');
+    title.className = 'project-card-title';
+    title.textContent = item.label;
+    const footer = document.createElement('span');
+    footer.className = 'project-card-footer';
+    const date = document.createElement('span');
+    const updated = item.updated ? new Date(item.updated) : null;
+    date.textContent = updated && !Number.isNaN(updated.valueOf())
+      ? `${trash ? '删除于' : '更新于'} ${new Intl.DateTimeFormat('zh-CN', {year: 'numeric', month: 'short', day: 'numeric'}).format(updated)}`
+      : '项目工作区';
+    footer.append(date);
+    if (!trash) {
+      footer.append(uiIcon('forward'));
+      open.addEventListener('click', () => {
+        if (!allowProjectSwitch()) return;
+        run(open, '正在写入并打开项目…', async () => {
+          await flushProjectWrite();
+          await loadProject(item.id);
+        });
+      });
+    }
+    open.append(top, title, footer);
+    const actions = document.createElement('div');
+    actions.className = 'project-card-actions';
+    const change = document.createElement('button');
+    change.type = 'button';
+    change.textContent = trash ? '恢复项目' : '删除项目';
+    change.setAttribute('aria-label', `${change.textContent}「${item.label}」`);
+    change.onclick = () => {
+      if (!trash && !confirm(`将「${item.label}」移入回收站？项目文件和历史可以恢复。`)) return;
+      run(change, trash ? '正在恢复项目…' : '正在移入回收站…', async () => {
+        if (!trash && openProject?.id === item.id) await flushProjectWrite();
+        await request(`/api/workspace/project/${trash ? 'restore-deleted' : 'delete'}`, {id: item.id});
+        if (!trash && openProject?.id === item.id) resetProjectEditor();
+        await refreshProjects();
+        (field('project-list').querySelector('button') || field('project-trash-toggle')).focus();
+        message(trash ? '已恢复，可在项目库打开。' : '已移入回收站。');
+      });
+    };
+    actions.append(change);
+    card.append(open, actions);
+    list.append(card);
+  }
+  list.hidden = !items.length;
+  field('project-empty').hidden = Boolean(items.length);
+  field('project-empty-title').textContent = trash ? '回收站为空' : '还没有项目';
+  field('project-empty-detail').textContent = trash ? '删除的项目会显示在这里。'
+    : '新建空白项目，或导入 TXT、Markdown 开始制作。';
+  field('project-empty-detail').hidden = Boolean(items.length);
+  field('project-count').textContent = `${total} 个项目`;
+  field('project-pages').hidden = total <= limit;
+  field('project-prev').disabled = projectPageOffset === 0;
+  field('project-next').disabled = projectPageOffset + limit >= total;
+}
+
+field('project-trash-toggle').onclick = (event) => {
+  showProjectTrash = !showProjectTrash;
+  projectPageOffset = 0;
+  event.currentTarget.textContent = showProjectTrash ? '返回项目库' : '回收站';
+  event.currentTarget.setAttribute('aria-pressed', String(showProjectTrash));
+  field('project-library-title').textContent = showProjectTrash ? '回收站' : '全部项目';
+  field('project-create-open').hidden = showProjectTrash;
+  refreshProjects().catch((error) => message(error.message, true));
+};
+field('project-prev').onclick = () => {
+  projectPageOffset = Math.max(0, projectPageOffset - 100);
+  refreshProjects().catch((error) => message(error.message, true));
+};
+field('project-next').onclick = () => {
+  projectPageOffset += 100;
+  refreshProjects().catch((error) => message(error.message, true));
+};
+
+async function refreshProjectHistory() {
+  if (!openProject) {
+    projectHistoryItems = [];
+    updateWorkspaceStatus();
+    return;
+  }
+  const scope = openProject.id;
+  const response = await request('/api/workspace/project/history', {id: scope});
+  const result = await response.json();
+  if (scope !== openProject?.id) return;
+  projectHistoryItems = result.items || [];
+  const list = field('project-history-list');
+  list.replaceChildren();
+  projectHistoryItems.forEach((item, index) => {
+    const row = document.createElement('li');
+    const details = document.createElement('div');
+    details.className = 'project-history-details';
+    const title = document.createElement('strong');
+    title.textContent = item.current ? `${item.title} · 当前版本` : item.title;
+    const date = document.createElement('small');
+    const updated = item.updated ? new Date(item.updated) : null;
+    date.textContent = updated && !Number.isNaN(updated.valueOf())
+      ? new Intl.DateTimeFormat('zh-CN', {year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}).format(updated)
+      : `版本 ${projectHistoryItems.length - index}`;
+    details.append(title, date);
+    row.append(details);
+    if (!item.current) {
+      const restore = document.createElement('button');
+      restore.type = 'button';
+      restore.textContent = '恢复此版本';
+      restore.addEventListener('click', () => run(restore, '正在恢复历史版本…', async () => {
+        await flushProjectWrite();
+        const id = openProject?.id;
+        if (!id) throw new Error('项目已关闭。');
+        await request('/api/workspace/project/restore', {id, revision: item.revision});
+        field('project-history-dialog').close();
+        await loadProject(id);
+        message(`已恢复到「${item.title}」，并写入新版本。`);
+      }));
+      row.append(restore);
+    }
+    list.append(row);
+  });
+  updateWorkspaceStatus();
 }
 
 async function loadProject(id, revision) {
   if (!id) throw new Error('请选择要打开的项目。');
+  clearTimeout(projectWriteTimer);
   const response = await request('/api/workspace/project/open', {id, revision});
   const project = await response.json();
   openProject = {id: project.id, revision: project.revision};
+  projectHistoryItems = [];
   field('project-name').value = project.title;
+  applyProjectConfig(project.config);
   field('project-save-copy').disabled = false;
   raw.value = project.raw;
-  scenario.value = project.scenario;
+  scenario.value = '';
   cues.value = JSON.stringify(project.cues, null, 2);
   field('heading').value = project.heading;
   field('speakers').value = JSON.stringify(project.speakers, null, 2);
@@ -442,33 +1222,162 @@ async function loadProject(id, revision) {
   invalidateScenes();
   renderFiles();
   font.value = project.font;
+  if (project.scenario) showScenario(project.scenario);
+  editorBaseline = editorFingerprint();
+  updateProjectScope();
   await refreshProjects();
+  await refreshProjectHistory();
+  goWorkspace('projects');
   message(`已打开「${project.title}」。`);
 }
 
-async function saveProject(copy = false) {
-  const title = field('project-name').value.trim();
+async function saveProject(copy = false, title = field('project-name').value.trim()) {
+  const scope = openProject;
+  const fingerprint = editorFingerprint();
   const assets = Object.fromEntries([...uploads].map(([name, file]) => [name, managedAssets.get(file)]));
   const data = {
-    ...(copy ? {} : openProject), title, raw: raw.value, scenario: scenario.value,
-    cues: mapping(cues.value, '演出 JSON'), assets, font: font.value, heading: field('heading').value,
+    ...(copy ? {} : openProject), title, raw: raw.value, scenario: scenarioData(),
+    cues: mapping(cues.value, '演出 JSON'), assets, font: font.value, config: projectConfig(), heading: field('heading').value,
     speakers: mapping(field('speakers').value, '说话人映射'),
   };
   const response = await request('/api/workspace/project/save', data);
   const project = await response.json();
+  if (scope !== openProject) return;
+  const unchanged = fingerprint === editorFingerprint();
   openProject = {id: project.id, revision: project.revision};
+  if (unchanged) field('project-name').value = project.title;
+  for (const [name, id] of Object.entries(project.assets || {})) {
+    const file = uploads.get(name);
+    if (file) managedAssets.set(file, id);
+  }
   field('project-save-copy').disabled = false;
+  if (unchanged) editorBaseline = editorFingerprint();
+  updateProjectScope();
   await refreshProjects();
-  message(`已保存「${project.title}」。`);
+  await refreshProjectHistory();
+  message(`已写入「${project.title}」的历史版本。`);
 }
 
-field('project-save').onclick = (event) => run(event.currentTarget, '正在保存项目…', () => saveProject());
-field('project-save-copy').onclick = (event) => run(event.currentTarget, '正在另存项目…', () => saveProject(true));
-field('project-open').onclick = (event) => run(event.currentTarget, '正在读取项目…',
-  () => loadProject(field('project-select').value));
-refreshProjects().catch((error) => message(error.message, true));
+field('project-save-copy').onclick = (event) => {
+  const suffix = '（副本）';
+  const name = field('project-new-name').value.trim() || field('project-name').value.trim().slice(0, 128 - suffix.length) + suffix;
+  run(event.currentTarget, '正在写入并另存项目…', async () => {
+    await flushProjectWrite();
+    await saveProject(true, name);
+  });
+};
+field('project-create-open').onclick = () => {
+  field('project-create-dialog').showModal();
+  field('project-new-name').focus();
+};
+field('project-create-cancel').onclick = () => field('project-create-dialog').close();
+field('project-create-cancel-secondary').onclick = () => field('project-create-dialog').close();
+field('project-create-dialog').addEventListener('click', (event) => {
+  if (event.target === field('project-create-dialog')) field('project-create-dialog').close();
+});
+field('project-create').onsubmit = (event) => {
+  event.preventDefault();
+  if (!allowProjectSwitch()) return;
+  const name = field('project-new-name').value.trim();
+  if (!name) return message('请输入项目名称。', true);
+  run(field('project-new'), '正在创建项目…', async () => {
+    await flushProjectWrite();
+    const file = field('project-raw-file').files[0];
+    const rawText = file ? await readText(file) : '';
+    const response = await request('/api/workspace/project/save', {
+      title: name, raw: rawText, cues: {}, assets: {}, font: '', heading: '', speakers: {},
+    });
+    const project = await response.json();
+    field('project-new-name').value = '';
+    field('project-raw-file').value = '';
+    field('project-raw-file-name').textContent = '暂未选择文件';
+    field('project-create-dialog').close();
+    await loadProject(project.id);
+  });
+};
+field('project-keep').onclick = (event) => {
+  const name = field('project-new-name').value.trim();
+  if (!name) {
+    field('project-new-name').focus();
+    return message('请输入项目名称。', true);
+  }
+  run(event.currentTarget, '正在创建项目…', async () => {
+    await saveProject(true, name);
+    field('project-new-name').value = '';
+    field('project-create-dialog').close();
+  });
+};
+function resetProjectEditor() {
+  openProject = null;
+  projectHistoryItems = [];
+  field('project-name').value = '';
+  field('project-save-copy').disabled = true;
+  field('heading').value = '';
+  field('speakers').value = '{}';
+  field('project-width').value = 1280;
+  applyProjectConfig();
+  font.value = '';
+  raw.value = '';
+  scenario.value = '';
+  cues.value = '{}';
+  uploads.clear();
+  invalidateScenes();
+  renderFiles();
+  editorBaseline = editorFingerprint();
+  updateProjectScope();
+  goWorkspace('project-manager');
+}
+field('project-close').onclick = () => {
+  if (!allowProjectSwitch()) return;
+  run(field('project-close'), '正在写入并关闭项目…', async () => {
+    await flushProjectWrite();
+    resetProjectEditor();
+    await refreshProjects();
+    message('已关闭项目。');
+  });
+};
+field('project-undo').onclick = (event) => run(event.currentTarget, '正在撤回到上一版本…', async () => {
+  await flushProjectWrite();
+  const id = openProject?.id;
+  if (!id) throw new Error('项目已关闭。');
+  await request('/api/workspace/project/undo', {id});
+  await loadProject(id);
+  message('已撤回到上一历史版本，并保留本次撤回记录。');
+});
+field('project-write').onclick = (event) => run(event.currentTarget, '正在写入项目…', async () => {
+  await flushProjectWrite();
+  message('修改已写入项目历史。');
+});
+field('project-history-open').onclick = async (event) => run(event.currentTarget, '正在读取项目历史…', async () => {
+  await flushProjectWrite();
+  await refreshProjectHistory();
+  field('project-history-dialog').showModal();
+});
+field('project-history-close').onclick = () => field('project-history-dialog').close();
+field('project-history-dialog').addEventListener('click', (event) => {
+  if (event.target === field('project-history-dialog')) field('project-history-dialog').close();
+});
+field('project-name').addEventListener('input', updateProjectScope);
+field('config-llm-scenario-enabled').addEventListener('change', () => {
+  if (field('config-llm-scenario-enabled').checked && !scenarioLlmOverrideInitialized) {
+    copyGlobalLlmToScenarioOverride();
+    scenarioLlmOverrideInitialized = true;
+  }
+  updateScenarioLlmOverrideUi();
+  updateWorkspaceStatus();
+});
+for (const id of ['heading', 'speakers', ...projectConfigIds]) field(id).addEventListener('input', updateWorkspaceStatus);
+for (const id of projectConfigIds) field(id).addEventListener('change', updateWorkspaceStatus);
+refreshProjects().catch((error) => {
+  field('project-empty-title').textContent = '项目列表读取失败';
+  const detail = field('project-empty-detail');
+  detail.textContent = '请确认 Prisma 服务正在运行，然后刷新此页。';
+  detail.hidden = false;
+  field('project-count').textContent = '读取失败';
+  message(error.message, true);
+});
 action.addEventListener('change', refreshCueForm);
-font.addEventListener('change', () => { exported = false; updatePipeline(); });
+font.addEventListener('change', () => { exported = false; updateWorkspaceStatus(); });
 
 field('cue-form').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -504,8 +1413,9 @@ field('cue-form').addEventListener('submit', (event) => {
     }
     commands.push(cue);
     cues.value = JSON.stringify(plan, null, 2);
+    cues.dispatchEvent(new Event('input'));
     exported = false;
-    updatePipeline();
+    updateWorkspaceStatus();
     message(`已为 ${selectedLine.scene}/${selectedLine.index} 添加演出动作。`);
   } catch (error) {
     message(error.message, true);
@@ -522,48 +1432,40 @@ function encode(file) {
 }
 
 field('build').addEventListener('click', (event) => run(event.currentTarget, '正在构建 Ren’Py 工程…', async () => {
+  const project = openProject?.id;
+  const fingerprint = editorFingerprint();
   exported = false;
-  updatePipeline();
-  const text = scenario.value;
-  const planText = cues.value;
-  const plan = mapping(planText, '演出 JSON');
-  const chosenFont = font.value;
-  const referenced = new Set(chosenFont ? [chosenFont] : []);
-  for (const scene of Object.values(plan)) {
-    if (!scene || typeof scene !== 'object' || Array.isArray(scene)) throw new Error('每组演出绑定须为 JSON 对象。');
-    for (const commands of Object.values(scene)) {
-      if (!Array.isArray(commands)) throw new Error('每个文本条目的演出动作须为数组。');
-      for (const cue of commands) {
-        if (!cue || typeof cue !== 'object' || Array.isArray(cue)) throw new Error('每个演出动作须为对象。');
-        for (const [kind, value] of Object.entries(cue)) {
-          const name = kind === 'show' ? value?.file : value;
-          if (['background', 'show', 'music', 'sound', 'voice'].includes(kind) && typeof name === 'string') {
-            referenced.add(name);
-          }
-        }
-      }
-    }
+  updateWorkspaceStatus();
+  const scriptId = nodeInputs.find((item) => item.kind === 'script')?.id;
+  let payload;
+  if (scriptId) {
+    payload = {script_id: scriptId, project_id: project};
+  } else {
+    if (location.hash === '#stage-export') throw new Error('请先通过脚本版本。');
+    payload = scriptInputs();
+    if (!payload.scenario) throw new Error('请先生成或导入 Scenario。');
   }
-  const assetIds = {};
-  for (const name of referenced) {
-    const file = uploads.get(name);
-    if (!file) throw new Error(`请添加素材文件「${name}」。`);
-    assetIds[name] = managedAssets.get(file);
-    if (!assetIds[name]) throw new Error(`素材「${name}」尚未登记。`);
-  }
-  const response = await request('/api/build', {
-    scenario: text, cues: planText, font: chosenFont, asset_ids: assetIds, project_id: openProject?.id,
-  });
+  const response = await request('/api/build', payload);
   download(await response.blob(), 'prisma-renpy.zip');
+  if (project !== openProject?.id) return;
+  const id = response.headers.get('X-Prisma-Export-Id');
+  if (id) reportNodeOutput('export', {reference: {kind: 'export', id}, label: 'Ren’Py 工程 ZIP',
+    fingerprint});
   exported = true;
-  updatePipeline();
+  updateWorkspaceStatus();
   message('Ren’Py 工程已开始下载。');
 }));
 
-refreshCueForm();
-selectedPipelineNode = 'scenario';
-document.querySelectorAll('.flow-node[data-node="scenario"]').forEach((node) => node.setAttribute('aria-pressed', 'true'));
-document.querySelectorAll('.pipeline-edge').forEach((edge) => {
-  edge.classList.toggle('is-related', edge.dataset.from === selectedPipelineNode || edge.dataset.to === selectedPipelineNode);
+enablePipelinePanning();
+pipeline.addEventListener('click', (event) => {
+  const node = event.target.closest('.flow-node');
+  if (!node) return;
+  goWorkspace(`stage-${node.dataset.node}`);
+  if (openProject) field('pipeline-stage').focus({preventScroll: true});
 });
-updatePipeline();
+new MutationObserver(updateWorkspaceStatus).observe(field('image-gallery'), {childList: true});
+
+renderFiles();
+editorBaseline = editorFingerprint();
+updateWorkspaceStatus();
+workspaceView();

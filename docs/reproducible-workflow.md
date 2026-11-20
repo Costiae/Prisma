@@ -8,7 +8,7 @@ python webui.py
 
 | 入口 | 地址或命令 |
 | --- | --- |
-| WebUI | `http://127.0.0.1:8765/#image-studio` |
+| WebUI | `http://127.0.0.1:8765/#projects` |
 | MCP Streamable HTTP | `http://127.0.0.1:8765/mcp` |
 | MCP stdio | `python /absolute/path/to/Prisma/mcp_stdio.py` |
 
@@ -104,7 +104,7 @@ MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 
 
 ## 从 Scenario 到成品
 
-1. `scenario_draft` 接收 `raw` 和可选的说话人映射。传入 `line_ids: true` 可在草稿中写入稳定的文本 ID。人工校对 `scenario` 后，用 `scenario_inspect` 取得场景、行号和已有的文本 ID。
+1. `scenario_draft` 接收 `raw` 和可选的说话人映射。返回的 `scenario` 是 JSON 对象，带稳定的文本 ID 和原文行号。用 WebUI 按章节、场景与台词校对，或由程序直接读取。用 `scenario_inspect` 可取得每场的文本和 ID，也可把旧版 Markdown 转成标准 JSON。
 2. `scenario_asset_prompt` 接收 `scenario`、场景 ID、`kind`（`background`、`sprite` 或 `cg`）和可选的 `line`、`brief`、`trigger`。它返回提示词和附近的剧本台词，供确认构图与人物细节后生成。
 3. 在在线或本地路线挑图后，调用 `renpy_export`。`cues` 和 WebUI 同格式，每个生成素材通过 `image_assets` 映射到任务与文件。`renpy_export` 返回磁盘路径和下载地址。
 

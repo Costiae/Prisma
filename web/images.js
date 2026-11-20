@@ -26,15 +26,23 @@
   const uploadedCaptions = new Map();
   let lastGallery = '';
   let selectedPrompt = null;
+  let appliedDefaults = '';
 
   function report(text, error = false) {
-    get('status').textContent = text;
-    get('status').classList.toggle('error', error);
+    for (const element of [get('status'), field('toolkit-status')]) {
+      element.textContent = text;
+      element.classList.toggle('error-text', error);
+    }
+    if (!field('assets').hidden && error) message(text, true);
   }
 
   async function json(path, data) {
-    if (data !== undefined) return (await request(`${api}${path}`, data)).json();
-    const response = await fetch(`${api}${path}`);
+    if (data !== undefined) {
+      const payload = path.startsWith('/library/') ? data : {...data, ...projectScope()};
+      return (await request(`${api}${path}`, payload)).json();
+    }
+    const scope = path === '/catalog' && openProject ? `?project_id=${encodeURIComponent(openProject.id)}` : '';
+    const response = await fetch(`${api}${path}${scope}`);
     if (!response.ok) throw new Error((await response.json()).error);
     return response.json();
   }
@@ -110,7 +118,6 @@
     const trainModel = environment?.training_models?.find((model) => model.id === value('train-base'));
     get('local').hidden = get('local').disabled = !local;
     get('online').hidden = get('online').disabled = local;
-    field('local-toolkit').hidden = !local;
     get('mode-note').textContent = local
       ? (family === 'anima'
         ? (animaReady ? '本地出图使用动漫专用 Anima Base、Apple MLX 与所选 LoRA。'
@@ -125,6 +132,7 @@
       : (catalog?.online.ready ? '生成时会把提示词发送给 OpenAI，并使用账户额度。' : '请设置服务端 OPENAI_API_KEY 并重启 WebUI。');
     get('generate').disabled = working || !ready;
     get('export-lora').disabled = exportingLora || !value('lora');
+    get('use-existing-lora').disabled = !value('existing-lora-select');
     get('install').disabled = working || !environment?.supported || Boolean(environment.engine && environment.model);
     get('install-train').disabled = working || !environment?.training_supported
       || Boolean(installModel?.available && installModel?.trainer_available);
@@ -163,6 +171,68 @@
     retainOptions(get('train-parent'), [new Option('从头训练', ''), ...choices]);
   }
 
+  function populateProjectConfigOptions() {
+    if (!catalog) return;
+    const trainingModels = catalog.local.training_models || [];
+    const loras = catalog.loras.map(({label, id}) => [label, id]);
+    const models = trainingModels.map(({label, id}) => [label, id]);
+    const options = {
+      'config-image-base': [['自动选择已安装底模', ''], ...models.filter(([, id]) => id !== 'iris3b')],
+      'config-image-lora': [['底模', ''], ...loras],
+      'config-image-compare': [['关闭对照', 'none'], ['底模', ''], ...loras],
+      'config-image-online-model': [['使用服务默认模型', ''], ...catalog.online.models.map((model) => [model, model])],
+      'config-train-base': [['自动选择已安装底模', ''], ...models],
+      'config-train-dataset': [['每次手动选择', ''],
+        ...catalog.sources.filter((source) => source.saved).map(({label, id}) => [label, id])],
+      'config-train-parent': [['从头训练', ''], ...loras],
+    };
+    for (const [id, choices] of Object.entries(options)) {
+      const select = field(id);
+      const selected = select.value;
+      if (!choices.some(([, value]) => value === selected)) {
+        choices.push([`${selected} · 当前不可用`, selected]);
+      }
+      retainOptions(select, choices.map(([label, value]) => new Option(label, value)), selected);
+    }
+  }
+
+  function applyProjectDefaults() {
+    let config;
+    try { config = projectConfig(); } catch { return; }
+    const generation = config.generation;
+    const training = config.training;
+    const defaults = JSON.stringify([generation, training]);
+    if (appliedDefaults === defaults) return;
+    appliedDefaults = defaults;
+    trainingRankTouched = true;
+    trainingStepsTouched = true;
+    const setValue = (id, value) => {
+      const control = get(id);
+      const text = String(value);
+      if (!control.options || [...control.options].some((option) => option.value === text)) control.value = text;
+    };
+    const radios = get('form').querySelectorAll('[name="image-mode"]');
+    for (const radio of radios) radio.checked = radio.value === generation.mode;
+    for (const [name, value] of [['base-model', generation.base_model], ['lora', generation.lora],
+      ['weight', generation.weight], ['local-size', generation.size], ['seed', generation.seed ?? ''],
+      ['sampler', generation.sampler], ['steps', generation.steps], ['cfg', generation.cfg],
+      ['count', generation.count], ['negative', generation.negative], ['online-size', generation.online_size],
+      ['quality', generation.quality], ['model', generation.online_model]]) {
+      setValue(name, value);
+    }
+    updateCompareOptions();
+    setValue('compare', generation.compare);
+    const trainValues = {'train-base': training.base_model, 'train-dataset': training.dataset,
+      'train-name': training.name, 'train-steps': training.steps,
+      'train-save': training.save_every, 'train-rank': training.rank, 'train-lr': training.lr,
+      'train-repeats': training.repeats, 'train-seed': training.seed};
+    for (const [id, value] of Object.entries(trainValues)) setValue(id, value);
+    updateTrainingParentOptions();
+    setValue('train-parent', training.parent);
+    updateTrainingModelHelp();
+    controls();
+  }
+
   function setHistory(rows, preferred) {
     const choices = rows.map((job) => {
       const time = new Date(job.started).toLocaleString('zh-CN', {month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'});
@@ -173,7 +243,11 @@
 
   async function refresh(preferredJob) {
     const first = !catalog;
-    catalog = await json('/catalog');
+    const previousFamily = selectedLoraFamily();
+    const project = openProject?.id;
+    const loaded = await json('/catalog');
+    if (project !== openProject?.id) return;
+    catalog = loaded;
     const env = catalog.local;
     const models = env.training_models || [];
     const options = catalog.loras.filter((lora) => ['sd1', 'sdxl', 'anima'].includes(lora.family))
@@ -190,12 +264,15 @@
       first ? (generationModels.some((model) => model.id === 'anima') ? 'anima'
         : generationModels.some((model) => model.id === 'sdxl') ? 'sdxl' : generationModels[0]?.id) : undefined);
     retainOptions(get('lora'), [new Option('底模', ''), ...options]);
+    retainOptions(get('existing-lora-select'), [new Option('选择已有 LoRA', ''),
+      ...catalog.loras.filter((lora) => ['sd1', 'sdxl', 'anima'].includes(lora.family))
+        .map((lora) => new Option(`${lora.label} · ${lora.family}`, lora.id))]);
     const selectedLora = catalog.loras.find((item) => item.id === value('lora'));
     if (selectedLora && [...get('base-model').options].some((option) => option.value === selectedLora.family)) {
       get('base-model').value = selectedLora.family;
     }
     updateCompareOptions();
-    updateGenerationDefaults();
+    if (first || selectedLoraFamily() !== previousFamily) updateGenerationDefaults();
     retainOptions(get('train-base'), installedModels.length
       ? installedModels.map((model) => new Option(model.label, model.id))
       : [new Option('先安装训练底模', '')], installedModels.some((model) => model.id === value('train-base'))
@@ -204,6 +281,8 @@
     if (!trainingRankTouched) get('train-rank').value = ['iris3b', 'anima'].includes(value('train-base')) ? '16'
       : value('train-base') === 'sdxl' ? '8' : '4';
     updateTrainingModelHelp();
+    populateProjectConfigOptions();
+    applyProjectDefaults();
     get('r2r3').hidden = !['r2-200', 'r3-200'].every((id) => catalog.loras.some((lora) => lora.id === id));
 
     const status = (path, supported) => path || (supported ? '尚未安装' : '当前设备不支持');
@@ -258,6 +337,23 @@
     get('log-box').hidden = !job?.log;
     if (get('log').textContent !== (job?.log || '')) get('log').textContent = job?.log || '';
 
+    const pending = Boolean(activeState(job));
+    const completed = job?.state === 'done';
+    reportNodeOutput('generation', job?.kind === 'generate' ? {
+      pending, label: completed ? '已完成的生成任务' : '',
+      reference: completed ? {kind: 'job', id: job.id} : null,
+    } : null);
+    reportNodeOutput('candidates', job?.kind === 'generate' ? {
+      pending, label: completed && job.images?.length ? `${job.images.length} 张候选图` : '',
+      reference: completed && job.images?.length === 1
+        ? {kind: 'artifact', id: `${job.id}/images/${job.images[0].name}`} : null,
+    } : null);
+    reportNodeOutput('train', job?.kind === 'train' ? {
+      pending, label: completed ? '训练已完成，可选择检查点' : '',
+      reference: completed && job.checkpoints?.length === 1 && job.checkpoints[0].id
+        ? {kind: 'lora', id: job.checkpoints[0].id} : null,
+    } : null);
+
     const canUse = (item) => catalog?.loras.some((lora) => lora.id === item.id
       && (lora.family !== 'sdxl' || (catalog.local?.training_device?.includes('MPS')
         && catalog.local?.training_models?.some((model) => model.id === 'sdxl'
@@ -294,12 +390,14 @@
       add.onclick = async () => {
         if (uploads.has(name)) return report('图片已经在当前工程素材中。');
         add.disabled = true;
+        const scope = projectScope();
         try {
-          const saved = await registerMedia(name, {artifact: {job_id: job.id, name: item.name}});
+          const saved = await registerMedia(name, {artifact: {job_id: job.id, name: item.name}}, scope);
+          if (scope.project_id !== openProject?.id) return;
           useManagedMedia(name, saved.id);
           renderFiles();
           if (['show', 'background'].includes(action.value)) asset.value = name;
-          report('图片已加入素材，可在「演出与素材」绑定到台词。');
+          report('图片已加入项目素材，可在「演出」里绑定到台词。');
         } catch (error) {
           report(error.message, true);
         } finally { add.disabled = false; }
@@ -323,14 +421,7 @@
       use.setAttribute('aria-label', `试画 ${item.label}`);
       use.disabled = !canUse(item);
       if (use.disabled) use.title = '此设备尚未安装可用于该 LoRA 的本地预览环境。';
-      use.onclick = () => {
-        setMode('local');
-        get('compare').value = 'none';
-        get('lora').value = item.id;
-        get('lora').onchange();
-        get('prompt').focus();
-        report(`已选中 ${item.label}，填写提示词后即可生成。`);
-      };
+      use.onclick = () => prepareLora(item.id);
       const row = document.createElement('div');
       row.className = 'studio-actions checkpoint-row';
       row.append(file, use);
@@ -341,6 +432,45 @@
   function setMode(value) {
     get('form').querySelector(`[name="image-mode"][value="${value}"]`).checked = true;
   }
+
+  async function prepareLora(id) {
+    if (!id) return;
+    const project = openProject?.id;
+    try {
+      const selection = await json('/loras/prepare', {id});
+      if (openProject?.id !== project) return;
+      if (!catalog?.loras.some((item) => item.id === id)) await refresh();
+      if (openProject?.id !== project) return;
+      if (![...get('lora').options].some((option) => option.value === id)) {
+        throw new Error('当前生成界面无法选择该权重，请刷新模型列表。');
+      }
+      goWorkspace('stage-generation');
+      setMode(selection.generation.mode);
+      get('lora').value = id;
+      get('lora').onchange();
+      get('compare').value = 'none';
+      get('weight').value = selection.generation.weight;
+      controls();
+      get('prompt').focus();
+      report(selection.ready ? `已加载「${selection.label}」，可以填写提示词并生成。`
+        : `已选中「${selection.label}」。${selection.hint}`);
+    } catch (error) { message(error.message, true); report(error.message, true); }
+  }
+
+  get('existing-lora-select').onchange = () => {
+    controls();
+    const stage = field('pipeline-stage');
+    if (stage.hidden || !['models', 'train'].includes(stage.dataset.node)) return;
+    const lora = catalog?.loras.find((item) => item.id === value('existing-lora-select'));
+    reportNodeOutput(stage.dataset.node, lora ? {reference: {kind: 'lora', id: lora.id}, label: lora.label} : null);
+  };
+  get('use-existing-lora').onclick = () => prepareLora(value('existing-lora-select'));
+  get('refresh-loras').onclick = (event) => run(event.currentTarget, '正在刷新权重列表…', async () => {
+    await json('/library/refresh', {});
+    await refresh();
+    report('已刷新可用的 LoRA。');
+  });
+  document.addEventListener('prisma-use-lora', (event) => prepareLora(event.detail.id));
 
   function reuse(options) {
     if (options.mode === 'local' && options.loras.some((x) => x.id && !catalog.loras.some((lora) => lora.id === x.id))) {
@@ -365,8 +495,9 @@
 
   async function show(id) {
     if (!id) return renderJob(null);
+    const project = openProject?.id;
     const job = await json(`/jobs/${id}`);
-    if (currentJob === id) renderJob(job);
+    if (project === openProject?.id && currentJob === id) renderJob(job);
     return job;
   }
 
@@ -393,14 +524,19 @@
 
   async function submitJob(route, data) {
     submitting = true;
+    const node = route === '/generate' ? 'generation' : route === '/train' ? 'train' : null;
+    const project = openProject?.id;
+    if (node) reportNodeOutput(node, {pending: true});
     controls();
     try {
       const job = await json(route, data);
+      if (project !== openProject?.id) return;
       activeJob = activeState(job) ? job.id : null;
       currentJob = job.id;
       report('任务已提交。');
       await refresh(job.id);
     } catch (error) {
+      if (node && project === openProject?.id && !activeJob) reportNodeOutput(node, null);
       report(error.message, true);
       if (activeJob) schedulePoll();
     } finally {
@@ -481,21 +617,30 @@
     }
     get('preset').value = '';
   };
-  get('scene').onclick = async () => {
-    const scene = inspectedText === scenario.value && scenes[Number(sceneSelect.value)];
-    if (!scene) return report('请先解析 Scenario，再选择要制作图片的场景。', true);
+  get('scene').onclick = (event) => run(event.currentTarget, '正在带入场景…', async () => {
     try {
+      const project = openProject?.id;
+      const approved = await approvedNodeInput('scenario');
+      if (project !== openProject?.id) return;
+      const document = approved?.scenario || scenarioData();
+      const available = document?.chapters.flatMap((chapter) => chapter.scenes) || [];
+      const selected = inspectedText === scenario.value && scenes[Number(sceneSelect.value)];
+      const scene = available.find((item) => item.id === selected?.id) || available[0];
+      if (!scene) return report('请先生成或导入 Scenario。', true);
       const kind = action.value === 'background' ? 'background' : action.value === 'show' ? 'sprite' : 'cg';
-      const response = await request('/api/asset-prompt', {scenario: scenario.value, scene: scene.id, kind,
-        line: selectedLine?.index ?? 1, brief: value('prompt').trim().slice(0, 3000)});
+      const line = selectedLine?.scene === scene.id && selectedLine.index <= scene.lines.length ? selectedLine.index : 1;
+      const response = await request('/api/asset-prompt', {scenario: document, scene: scene.id, kind,
+        line, brief: value('prompt').trim().slice(0, 3000), config: projectConfig(), ...projectScope()});
       const result = await response.json();
+      if (project !== openProject?.id) return;
       selectedPrompt = result.prompt_id;
       const context = result.context.map((line) => `${line.speaker ? `${line.speaker}：` : ''}${line.text}`).join('\n').slice(0, 700);
       get('prompt').value = `${result.prompt}\n\n场景参考（${result.chapter} · ${result.scene}）：\n${context}`.slice(0, 4000);
+      get('prompt').dispatchEvent(new Event('input', {bubbles: true}));
       get('prompt').focus();
       report('已带入场景和素材构图建议。');
     } catch (error) { report(error.message, true); }
-  };
+  });
   get('r2r3').onclick = () => {
     get('lora').value = 'r2-200';
     get('compare').value = 'r3-200';
@@ -654,6 +799,7 @@
       await refresh();
       get('train-dataset').value = saved.id;
       get('train-dataset').onchange();
+      reportNodeOutput('dataset', {reference: {kind: 'dataset', id: saved.id}, label: saved.name});
       report(`已保存数据集「${saved.name}」，共 ${saved.count} 张；已选为训练数据。`);
     } catch (error) { report(error.message, true); }
     finally { datasetBusy = false; rowCount(); }
@@ -671,6 +817,7 @@
       await refresh();
       get('train-dataset').value = saved.id;
       get('train-dataset').onchange();
+      reportNodeOutput('dataset', {reference: {kind: 'dataset', id: saved.id}, label: saved.name});
       report(`已恢复数据集「${saved.name}」，共 ${saved.count} 张。`);
     } catch (error) { report(error.message, true); }
     finally { input.disabled = false; }
@@ -681,26 +828,37 @@
     const [file] = input.files;
     input.value = '';
     if (!file) return;
-    if (file.size > 45 * 1048576) return report('文件超过 45 MiB，请复制到工具箱的 loras 目录，再刷新环境。', true);
+    const scope = projectScope();
+    const family = value('import-family');
+    if (file.size > 45 * 1048576) return report('文件超过 45 MiB 的浏览器上传上限。', true);
     input.disabled = true;
     try {
-      const imported = await json('/loras', {name: file.name, data: await encode(file)});
+      const data = await encode(file);
+      if (scope.project_id !== openProject?.id) return;
+      const response = await request(`${api}/loras`, {name: file.name, family, data, ...scope});
+      const imported = await response.json();
+      if (scope.project_id !== openProject?.id) return;
       await refresh();
-      get('lora').value = imported.id;
-      get('lora').onchange();
-      report(`已导入 ${file.name}。`);
+      if (scope.project_id !== openProject?.id) return;
+      get('existing-lora-select').value = imported.id;
+      get('existing-lora-select').onchange();
+      report(`已导入 ${file.name}。点「用于本地生成」加载此权重。`);
     } catch (error) { report(error.message, true); }
     finally { input.disabled = false; }
   };
 
   const libraryLabels = {project: '项目', revision: '项目版本', source: '原文', scenario: 'Scenario',
-    cues: '演出绑定', prompt: '提示词', asset: '媒体素材', tool: '工具', model: '模型', lora: 'LoRA',
-    dataset: '数据集', job: '任务', artifact: '产物', export: '导出'};
+    cues: '演出绑定', prompt: '提示词', script: '脚本', asset: '媒体素材', tool: '工具', model: '模型', lora: 'LoRA',
+    dataset: '数据集', job: '任务', artifact: '产物', export: '导出', pipeline: '项目节点状态',
+    'node-version': '节点版本', handoff: '历史节点版本'};
   const libraryStates = {...stateLabels, installed: '已安装', not_installed: '未安装', remote: '在线', legacy: '历史数据'};
-  const relationLabels = {uses_model: '使用底模', uses_dataset: '使用数据集', uses_lora: '使用 LoRA',
+  const relationLabels = {current_handoff: '历史当前版本', previous_handoff: '上一节点版本',
+    from_handoff: '历史上游版本', current_node_version: '当前节点版本', previous_node_version: '上一节点版本',
+    from_node_version: '使用的上游版本', uses_resource: '关联产物',
+    uses_model: '使用底模', uses_dataset: '使用数据集', uses_lora: '使用 LoRA',
     continues_from: '续训起点', replay_of: '复跑来源', produced_by: '来源任务', weight_file: '权重文件',
     derived_from: '数据集来源', includes: '包含', uses_prompt: '使用提示词', for_project: '所属项目',
-    uses_source: '使用原文', uses_scenario: '使用 Scenario', uses_cues: '使用演出绑定', uses_asset: '使用素材',
+    uses_source: '使用原文', uses_scenario: '使用 Scenario', uses_cues: '使用演出绑定', uses_asset: '使用素材', from_script: '已通过的脚本',
     from_source: '原文来源', from_scenario: 'Scenario 来源', adapted_from: '改写自',
     from_artifact: '来自产物', current_revision: '当前版本', previous_revision: '上一版',
     for_scenario: '对应 Scenario', member_of: '所属数据集', uses_tool: '使用工具'};
@@ -737,8 +895,12 @@
         link.href = item.metadata.url;
         detail.append(link);
       }
+      if (item.kind === 'lora' && item.available && ['sd1', 'sdxl', 'anima'].includes(item.metadata.family)) {
+        detail.append(libraryButton('用于本地生成', () => prepareLora(item.id)));
+      }
       if (item.kind === 'job' && item.available) {
         detail.append(libraryButton('查看任务和产物', async () => {
+          goWorkspace('stage-candidates');
           currentJob = item.id;
           const history = get('history');
           if (![...history.options].some((option) => option.value === item.id)) {
@@ -751,15 +913,16 @@
       }
       if ((item.kind === 'project' || item.kind === 'revision') && item.available) {
         detail.append(libraryButton('打开到工作台', async () => {
+          if (!allowProjectSwitch()) return;
           try {
             await loadProject(item.kind === 'project' ? item.id : item.metadata.project_id,
               item.kind === 'revision' ? item.id : undefined);
-            field('project-name').focus();
           } catch (error) { report(error.message, true); }
         }));
       }
       if (item.kind === 'prompt' && item.metadata.prompt) {
         detail.append(libraryButton('带入生成表单', () => {
+          goWorkspace('stage-generation');
           get('prompt').value = item.metadata.prompt;
           get('negative').value = item.metadata.negative || '';
           selectedPrompt = item.id;
@@ -768,18 +931,29 @@
       }
       if (item.kind === 'asset' && item.available) {
         detail.append(libraryButton('加入当前项目素材', async () => {
+          const scope = projectScope();
           try {
-            const saved = item.metadata.url?.startsWith('/api/workspace/assets/')
+            const matchingScope = (item.project_id ?? null) === (openProject?.id ?? null);
+            const saved = matchingScope && item.metadata.url?.startsWith('/api/workspace/assets/')
               ? {id: item.id, name: item.metadata.name}
-              : await registerMedia(item.label, {library_id: item.id});
+              : await registerMedia(item.label, {library_id: item.id}, scope);
+            if (scope.project_id !== openProject?.id) return;
             if (uploads.has(saved.name) && !confirm(`替换同名素材「${saved.name}」？`)) return;
             useManagedMedia(saved.name, saved.id);
             renderFiles();
-            report('素材已加入当前项目。');
+            previewProjectAsset(saved.name);
+            message('素材已加入当前项目。');
           } catch (error) { report(error.message, true); }
         }));
       }
-      const editor = {source: raw, scenario, cues}[item.kind];
+      if (item.kind === 'scenario' && item.metadata.scenario) {
+        detail.append(libraryButton('载入剧本', () => {
+          if (scenario.value && !confirm('替换当前剧本？')) return;
+          showScenario(item.metadata.scenario);
+          goWorkspace('stage-scenario');
+        }));
+      }
+      const editor = {source: raw, cues}[item.kind];
       const content = item.kind === 'cues' && item.metadata.cues
         ? JSON.stringify(item.metadata.cues, null, 2) : item.metadata.text;
       if (editor && typeof content === 'string') {
@@ -787,6 +961,7 @@
           if (editor.value.trim() && editor.value !== content && !confirm('替换编辑框中的文本？')) return;
           editor.value = content;
           editor.dispatchEvent(new Event('input'));
+          goWorkspace(editor === raw ? 'stage-raw' : 'stage-cues');
           editor.focus();
         }));
       }
@@ -819,6 +994,8 @@
     get('library-next').disabled = true;
     status.textContent = '正在查询…';
     const filters = {query: value('library-query').trim(), offset, limit: libraryPage};
+    if (value('library-scope') === 'current' && openProject) filters.project_id = openProject.id;
+    else filters.shared = true;
     if (value('library-kind')) filters.kind = value('library-kind');
     try {
       const result = await json('/library/list', filters);
@@ -839,9 +1016,72 @@
     }
   }
 
-  get('library').ontoggle = () => { if (get('library').open) loadLibrary(); };
+  document.addEventListener('prisma-library-open', (event) => {
+    const {kind, id} = event.detail;
+    libraryDetail(kind, id);
+    get('library-detail').scrollIntoView({block: 'start'});
+  });
+  async function usePassedPrompt(reference, {onlyEmpty = false} = {}) {
+    const project = openProject?.id;
+    if (onlyEmpty && value('prompt').trim()) return;
+    try {
+      const response = await request('/api/images/library/item', {kind: 'prompt', id: reference.id});
+      const {metadata} = await response.json();
+      const stage = field('pipeline-stage');
+      if (openProject?.id !== project || stage.hidden || stage.dataset.node !== 'generation') return;
+      if (onlyEmpty && value('prompt').trim()) return;
+      get('prompt').value = metadata.prompt;
+      get('negative').value = metadata.negative || '';
+      selectedPrompt = reference.id;
+      get('prompt').dispatchEvent(new Event('input', {bubbles: true}));
+    } catch (error) { report(error.message, true); }
+  }
+  document.addEventListener('prisma-node-use-prompt', (event) => usePassedPrompt(event.detail));
+  async function usePassedDataset(reference) {
+    const project = openProject?.id;
+    try {
+      if (![...get('train-dataset').options].some((option) => option.value === reference.id)) await refresh();
+      if (project !== openProject?.id || field('pipeline-stage').hidden || field('pipeline-stage').dataset.node !== 'train') return;
+      if ([...get('train-dataset').options].some((option) => option.value === reference.id)) {
+        get('train-dataset').value = reference.id;
+        get('train-dataset').onchange();
+      }
+    } catch (error) { report(error.message, true); }
+  }
+  document.addEventListener('prisma-node-use-dataset', (event) => usePassedDataset(event.detail));
+  document.addEventListener('prisma-node-use-lora', ({detail}) => {
+    if ([...get('existing-lora-select').options].some((option) => option.value === detail.id)) {
+      get('existing-lora-select').value = detail.id;
+      get('existing-lora-select').onchange();
+    } else report('该 LoRA 当前不可用。请刷新权重列表。', true);
+  });
+  document.addEventListener('prisma-node-tools', ({detail}) => {
+    if (catalog && ['online', 'generation', 'train'].includes(detail)) applyProjectDefaults();
+    if (detail === 'online') { setMode('online'); controls(); }
+    if (detail === 'generation') {
+      const ref = nodeInputs.find((item) => item.kind === 'prompt');
+      if (ref) usePassedPrompt(ref, {onlyEmpty: true});
+    }
+    if (detail === 'candidates') {
+      const ref = nodeInputs.find((item) => item.kind === 'job');
+      if (ref && [...get('history').options].some((option) => option.value === ref.id)) {
+        get('history').value = ref.id;
+        get('history').onchange();
+      }
+    }
+    if (detail === 'train' && !value('train-dataset')) {
+      const ref = nodeInputs.find((item) => item.kind === 'dataset');
+      if (ref) usePassedDataset(ref);
+    }
+    if (field('stage-tools').contains(get('library'))) loadLibrary();
+  });
+  document.addEventListener('prisma-view-change', (event) => {
+    if (event.detail === 'assets') loadLibrary();
+    if (['images', 'models'].includes(event.detail)) applyProjectDefaults();
+  });
   get('library-search').onsubmit = (event) => { event.preventDefault(); loadLibrary(); };
   get('library-kind').onchange = () => loadLibrary();
+  get('library-scope').onchange = () => loadLibrary();
   get('library-prev').onclick = () => loadLibrary(Math.max(0, libraryOffset - libraryPage));
   get('library-next').onclick = () => loadLibrary(libraryOffset + libraryPage);
   get('library-sync').onclick = async () => {
@@ -855,6 +1095,30 @@
     finally { button.disabled = false; }
   };
 
+  document.addEventListener('prisma-project-change', () => {
+    const scope = get('library-scope');
+    scope.querySelector('option[value="current"]').disabled = !openProject;
+    scope.value = openProject ? 'current' : 'shared';
+    selectedPrompt = null;
+    appliedDefaults = '';
+    get('prompt').value = '';
+    get('negative').value = get('negative').defaultValue;
+    currentJob = '';
+    activeJob = null;
+    catalog = null;
+    sourceItems = [];
+    addedImages.clear();
+    uploadedCaptions.clear();
+    get('dataset-items').replaceChildren();
+    setDatasetDownload('');
+    setHistory([]);
+    renderJob(null);
+    controls();
+    if (!field('assets').hidden) loadLibrary();
+    refresh().catch((error) => report(error.message, true));
+  });
+
   controls();
+  if (!field('assets').hidden) loadLibrary();
   refresh().then(() => report('图像工作室已就绪。')).catch((error) => report(error.message, true));
 })();

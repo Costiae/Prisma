@@ -6,8 +6,8 @@ import json
 import sqlite3
 
 
-KINDS = ('project', 'revision', 'source', 'scenario', 'cues', 'prompt', 'asset',
-         'tool', 'model', 'lora', 'dataset', 'job', 'artifact', 'export')
+KINDS = ('project', 'revision', 'source', 'scenario', 'cues', 'prompt', 'script', 'script-draft', 'asset',
+         'tool', 'model', 'lora', 'dataset', 'job', 'artifact', 'export', 'pipeline', 'node-version', 'handoff')
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS records (
@@ -55,8 +55,20 @@ class ImageLibrary:
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version == 0:
                 db.execute('PRAGMA journal_mode=WAL')
-                db.executescript(f'BEGIN IMMEDIATE; {SCHEMA} PRAGMA user_version=1; COMMIT;')
-            elif version != 1:
+            if version < 2:
+                db.execute('BEGIN IMMEDIATE')
+                version = db.execute('PRAGMA user_version').fetchone()[0]
+                if version == 0:
+                    for statement in SCHEMA.split(';'):
+                        if statement.strip():
+                            db.execute(statement)
+                if version < 2:
+                    db.execute('ALTER TABLE records ADD COLUMN project_id TEXT')
+                    db.execute('CREATE INDEX records_project ON records(project_id, kind, updated DESC, id)')
+                    self._backfill_projects(db)
+                    db.execute('PRAGMA user_version=2')
+                db.commit()
+            elif version != 2:
                 raise ValueError(f'此 Prisma 版本无法读取目录数据库版本 {version}。')
             yield db
 
@@ -84,13 +96,22 @@ class ImageLibrary:
         path = record.get('path')
         updated = record.get('updated') or datetime.now(timezone.utc).isoformat(
             timespec='milliseconds').replace('+00:00', 'Z')
+        metadata = record.get('metadata', {})
+        project = record.get('project_id') or metadata.get('project_id')
+        if kind == 'project':
+            project = ident
+        if not project:
+            project = next((target for relation, target_kind, target in record.get('links', ())
+                            if relation == 'for_project' and target_kind == 'project'), None)
         db.execute("""
-            INSERT INTO records VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO records (kind, id, owner, label, path, state, updated, metadata, project_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(kind, id) DO UPDATE SET
               owner=excluded.owner, label=excluded.label, path=excluded.path,
-              state=excluded.state, updated=excluded.updated, metadata=excluded.metadata
+              state=excluded.state, updated=excluded.updated, metadata=excluded.metadata,
+              project_id=coalesce(excluded.project_id, records.project_id)
         """, (kind, ident, owner, record['label'], self.location(path) if path else None,
-              record.get('state'), updated, json.dumps(record.get('metadata', {}), ensure_ascii=False)))
+              record.get('state'), updated, json.dumps(metadata, ensure_ascii=False), project))
         db.execute('DELETE FROM links WHERE kind = ? AND id = ?', (kind, ident))
         db.executemany('INSERT OR IGNORE INTO links VALUES (?, ?, ?, ?, ?)',
                        ((kind, ident, *link) for link in record.get('links', ())))
@@ -108,13 +129,65 @@ class ImageLibrary:
             """).fetchall()
         return [dict(row, metadata=json.loads(row['metadata'])) for row in rows]
 
-    def list(self, *, kind=None, query='', limit=30, offset=0):
+    def visible_ids(self, kind, project, *, include_shared=False):
+        shared = 'project_id IS NULL'
+        owned = 'project_id = ?'
+        predicate = f'({owned} OR {shared})' if project and include_shared else owned if project else shared
+        params = (kind, project) if project else (kind,)
+        with self.connection() as db:
+            return {row['id'] for row in db.execute(
+                f'SELECT id FROM records WHERE kind = ? AND {predicate}', params)}
+
+    def backfill_projects(self):
+        with self.connection() as db:
+            self._backfill_projects(db)
+
+    @staticmethod
+    def _backfill_projects(db):
+        db.execute("""
+            UPDATE records AS r SET project_id = CASE WHEN kind = 'project' THEN id ELSE
+              coalesce(json_extract(metadata, '$.project_id'), (
+                SELECT target_id FROM links
+                WHERE (kind, id) = (r.kind, r.id) AND relation = 'for_project' AND target_kind = 'project'
+                GROUP BY kind, id HAVING count(DISTINCT target_id) = 1
+              )) END WHERE project_id IS NULL
+        """)
+        db.execute("""
+            WITH ownership(kind, id, project_id) AS (
+                SELECT l.target_kind, l.target_id, min(r.project_id)
+                FROM links l JOIN records r ON (r.kind, r.id) = (l.kind, l.id)
+                WHERE r.kind IN ('revision', 'export') AND r.project_id IS NOT NULL
+                  AND coalesce(json_extract(r.metadata, '$.ownership_version'), 1) = 1
+                  AND l.relation IN ('uses_source', 'uses_scenario', 'uses_cues', 'uses_asset')
+                GROUP BY l.target_kind, l.target_id HAVING count(DISTINCT r.project_id) = 1
+            )
+            UPDATE records AS r SET project_id = o.project_id FROM ownership o
+            WHERE r.project_id IS NULL AND (r.kind, r.id) = (o.kind, o.id)
+        """)
+        db.execute("""
+            UPDATE records AS r SET project_id = parent.project_id
+            FROM links l JOIN records parent ON (parent.kind, parent.id) = (l.target_kind, l.target_id)
+            WHERE (l.kind, l.id) = (r.kind, r.id) AND r.project_id IS NULL
+              AND l.relation IN ('produced_by', 'member_of') AND r.kind IN ('artifact', 'asset', 'lora')
+              AND parent.project_id IS NOT NULL
+        """)
+
+    def list(self, *, kind=None, query='', limit=30, offset=0, project=None, shared=False, trash=False):
         where = """WHERE (? IS NULL OR kind = ?) AND
                    (? = '' OR instr(lower(label || ' ' || id || ' ' || coalesce(path, '') || ' ' || metadata), lower(?)) > 0)"""
         params = (kind, kind, query, query)
+        if trash:
+            where += " AND kind = 'project' AND state = 'trashed'"
+        else:
+            where += " AND (kind <> 'project' OR coalesce(state, '') <> 'trashed')"
+        if project:
+            where += ' AND project_id = ?'
+            params += (project,)
+        elif shared:
+            where += ' AND project_id IS NULL'
         with self.connection() as db:
             total = db.execute(f'SELECT count(*) FROM records {where}', params).fetchone()[0]
-            rows = db.execute(f"""SELECT kind, id, label, path, state, updated FROM records {where}
+            rows = db.execute(f"""SELECT kind, id, label, path, state, updated, project_id FROM records {where}
                 ORDER BY updated DESC, kind, id LIMIT ? OFFSET ?""", (*params, limit, offset)).fetchall()
         return {'items': [self.describe(row) for row in rows], 'total': total, 'limit': limit, 'offset': offset}
 
