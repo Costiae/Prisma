@@ -1540,11 +1540,18 @@ class ImageToolkit:
             else:
                 saved = {}
             negative = options.get('negative', '')
+            saved_context = saved.get('context', {})
+            context = None
+            if (saved.get('project_id') == project_id and saved_context.get('kind') == 'background'
+                    and saved_context.get('scene_design_id')):
+                context = saved_context
+                options['scene_design_id'] = context['scene_design_id']
             if (saved.get('prompt') == prompt and saved.get('negative', '') == negative
                     and saved.get('project_id') == project_id):
                 options['prompt_id'] = selected
             else:
-                options['prompt_id'] = self.resources.prompt(prompt, negative, derived_from=selected, project=project_id)
+                options['prompt_id'] = self.resources.prompt(prompt, negative, context=context,
+                                                             derived_from=selected, project=project_id)
             if project_id:
                 options['project_id'] = project_id
             return self.jobs.start('generate', options, work)

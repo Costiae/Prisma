@@ -234,6 +234,12 @@ class Handler(BaseHTTPRequestHandler):
         sdk = self.server.mcp.renpy_sdk
         projects = self.server.images.resources
         routes = {'/api/draft': studio.draft, '/api/scenes': inspect, '/api/scenario/anchor': studio.anchor,
+                  '/api/scenario/production/outline': self.server.mcp.production.outline,
+                  '/api/scenario/production/generate': self.server.mcp.production.generate,
+                  '/api/scenario/production/publish': self.server.mcp.production.publish,
+                  '/api/scenario/production/defaults': self.server.mcp.production.save_defaults,
+                  '/api/scenario/production/registry': self.server.mcp.production.registry,
+                  '/api/scenario/background-prompt': studio.background_prompt,
                   '/api/llm/status': studio.llm_status,
                   '/api/llm/api': studio.llm_api,
                   '/api/llm/credential': studio.llm_credential,

@@ -15,7 +15,9 @@ from image_library import artifact_id, timestamp
 from prisma import normalize_scenario
 
 
-DOCUMENT_KINDS = ('source', 'scenario', 'cues', 'prompt', 'script', 'script-draft', 'revision', 'pipeline', 'node-version', 'handoff')
+DOCUMENT_KINDS = ('source', 'scenario', 'cues', 'prompt', 'script', 'script-draft', 'revision', 'pipeline', 'node-version',
+                  'handoff', 'production-plan', 'production-default', 'production-checkpoint',
+                  'character-design', 'scene-design', 'cg-design', 'work-style')
 MEDIA_TYPES = {
     '.png': 'image', '.jpg': 'image', '.jpeg': 'image', '.webp': 'image',
     '.ogg': 'audio', '.opus': 'audio', '.mp3': 'audio', '.wav': 'audio', '.flac': 'audio',
@@ -247,6 +249,8 @@ class WorkspaceResources:
         metadata = dict(prompt=positive, negative=negative)
         if context:
             metadata['context'] = context
+            if scene := context.get('scene_design_id'):
+                links.append(('from_scene_design', 'scene-design', scene))
         return self.note('prompt', text_title(positive, '提示词'), metadata, links, project=project)
 
     def asset_path(self, metadata):

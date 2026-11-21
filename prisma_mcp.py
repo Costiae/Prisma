@@ -13,6 +13,7 @@ from image_library import KINDS
 from lora_export import save_export
 from pipeline_workflow import NODES, REFERENCE_KINDS, PipelineWorkflow
 from prisma_workflow import StudioWorkflow, inspect, make_archive
+from scenario_production import ScenarioProduction
 from provider_model_info import TEST_OPERATIONS
 from script_editor import ScriptEditor
 from script_story import inspect_story
@@ -64,11 +65,34 @@ class PrismaMCP:
         self.workflow = StudioWorkflow(images.resources)
         self.pipeline = PipelineWorkflow(images.resources)
         self.script_editor = ScriptEditor(images.resources, self.pipeline)
+        self.production = ScenarioProduction(self.workflow, self.script_editor, images.resources)
         self.renpy_sdk = RenpySDK(self.script_editor, self.pipeline, images.jobs)
         self.base_url = base_url
         self.exports = images.home / 'exports'
         self.tools = {}
         tool = self.register
+        tool('scenario_production_outline', 'List source chapter ranges and accepted production parameters.',
+             self.production.outline, {'project_id': JOB}, ('project_id',), read_only=True)
+        tool('scenario_production_generate', 'Generate source-anchored staging, CG declarations and character roles for a chapter range.',
+             self.production.generate, {'project_id': JOB, 'chapter_start': INT, 'chapter_count': INT,
+                'parameters': OBJECT, 'model_override': OBJECT, 'run_id': TEXT}, ('project_id',), open_world=True)
+        tool('scenario_production_publish', 'Register project asset briefs and open the production draft in the existing Script IDE.',
+             self.production.publish, {'project_id': JOB, 'id': TEXT, 'base': TEXT, 'style': OBJECT,
+                 'replace_generated': BOOL}, ('project_id', 'id', 'base'))
+        tool('scenario_production_review', 'Correct dialogue and names, set character roles, or replace the CG declarations in a plan.',
+             self.production.review, {'project_id': JOB, 'id': TEXT, 'dialogue': OBJECT, 'aliases': OBJECT,
+                 'staging_from': TEXT, 'character_roles': OBJECT, 'cg': schema('array', items=OBJECT)}, ('project_id','id'))
+        tool('scenario_production_import', 'Import source-anchored editorial annotations as a reviewable production plan.',
+             self.production.import_annotations, {'project_id': JOB, 'chapter_start': INT,
+                 'annotations': schema('array', items=OBJECT)}, ('project_id','annotations'))
+        tool('scenario_production_merge', 'Merge adjacent chapter plans from one original text revision.',
+             self.production.merge, {'project_id': JOB, 'ids': schema('array', items=TEXT)}, ('project_id','ids'))
+        tool('scenario_production_registry', 'Read project style, characters, scene or CG records. portraits_only lists eligible characters.',
+             self.production.registry, {'project_id': JOB, 'kind': enum('work-style','character-design','scene-design','cg-design'),
+                                        'portraits_only': BOOL},
+             ('project_id','kind'), read_only=True)
+        tool('scenario_production_defaults_save', 'Promote the actual parameters from a verified production plan.',
+             self.production.save_defaults, {'project_id': JOB, 'id': TEXT}, ('project_id', 'id'))
         tool('scenario_draft', 'Turn raw script text into a Scenario JSON object with stable line IDs and original line references. For a project, use its global text LLM settings unless the Scenario task override is enabled.',
              self.workflow.draft, {'raw': TEXT, 'speakers': OBJECT, 'heading': TEXT, 'line_ids': BOOL,
                                   'project_id': JOB, 'config': PROJECT_CONFIG,
@@ -120,7 +144,9 @@ class PrismaMCP:
              self.workflow.anchor, {'scenario': SCENARIO, 'cues': {'type': ['object', 'string']}, 'project_id': JOB}, ('scenario',))
         tool('scenario_asset_prompt', 'Register a background, sprite or CG prompt with the nearby Scenario lines for review.', self.workflow.asset_prompt,
              {'scenario': SCENARIO, 'scene': TEXT, 'kind': enum('background', 'sprite', 'cg'), 'line': INT,
-              'brief': TEXT, 'trigger': TEXT, 'project_id': JOB}, ('scenario', 'scene', 'kind'))
+              'brief': TEXT, 'trigger': TEXT, 'actor': TEXT, 'project_id': JOB}, ('scenario', 'scene', 'kind'))
+        tool('scenario_background_prompt', 'Prepare an image prompt from a project scene background design.',
+             self.workflow.background_prompt, {'project_id': JOB, 'id': TEXT}, ('project_id', 'id'))
         tool('script_preview', 'Compile Ren’Py in memory with scene, dialogue and asset mappings.',
              self.workflow.preview_script, SCRIPT_INPUT, ('scenario',), read_only=True)
         tool('script_bind', 'Insert or replace one cue on a specific line and return the regenerated Ren’Py script.',
@@ -215,7 +241,7 @@ class PrismaMCP:
         stage = {'project_id': JOB, 'node': enum(*NODES)}
         tool('pipeline_state', 'Read the project graph and the current result version of each node.',
              self.pipeline.state, {'project_id': JOB}, ('project_id',), read_only=True)
-        tool('pipeline_inputs', 'Read only the current input versions passed to this node by direct upstream nodes.',
+        tool('pipeline_inputs', 'Read passed upstream versions and available scene background drafts separately.',
              self.pipeline.inputs, stage, ('project_id', 'node'), read_only=True)
         tool('pipeline_approved', 'List current approved project outputs and their resource IDs. Specify a node to read its full output notes. needs_review indicates changed upstream versions.',
              self.pipeline.approved, stage, ('project_id',), read_only=True)

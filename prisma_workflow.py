@@ -371,7 +371,9 @@ def asset_prompt(data):
         raise ValueError('项目默认提示词须为文本。')
     if kind != 'background':
         negative += ', cropped head, extra limbs, animal ears, halo'
-    return {'scene': scene.id, 'chapter': scene.chapter, 'context': context, 'kind': kind,
+    return {'scene': scene.id, 'chapter': scene.chapter, 'scene_source_line': scene.lines[0].source,
+            'source_line': scene.lines[line - 1].source, 'speaker': scene.lines[line - 1].speaker,
+            'context': context, 'kind': kind,
             'prompt': ', '.join(part for part in (trigger, ASSET_FRAMING[kind], brief, style) if part),
             'negative': negative}
 
@@ -539,14 +541,57 @@ class StudioWorkflow:
         state, _ = self.resources.snapshot(result, project=project)
         return dict(result, scenario_id=state['scenario_id'], cues_id=state['cues_id'])
 
+    def background_prompt(self, data):
+        project = self.resources.load_project({'id': data['project_id']})
+        scene = self.resources.library.get('scene-design', require_text(data, 'id'))
+        if scene['project_id'] != project['id']:
+            raise ValueError('场景背景不属于当前项目。')
+        meta = scene['metadata']
+        prompt = ', '.join((ASSET_FRAMING['background'], meta['background_prompt']))
+        negative = project['config']['prompts']['negative']
+        context = {'kind': 'background', 'scene': meta['id'], 'scene_design_id': scene['id']}
+        ident = self.resources.prompt(prompt, negative, context=context, project=project['id'])
+        return {'prompt': prompt, 'negative': negative, 'prompt_id': ident}
+
     def asset_prompt(self, data):
         data = dict(data)
         project = data.get('project_id')
         if 'config' not in data and project:
             data['config'] = self.resources.load_project({'id': project})['config']
         result = asset_prompt(data)
-        scenario_id = self.resources.document('scenario', data.get('scenario'), project=project)
         context = {key: result[key] for key in ('scene', 'chapter', 'kind', 'context')}
+        kind = result['kind']
+        if project and kind in ('background', 'cg') and result['scene_source_line']:
+            with self.resources.library.connection() as db:
+                design = db.execute("""SELECT id, metadata FROM records WHERE kind='scene-design' AND project_id=?
+                    AND json_extract(metadata, '$.id')=? AND json_extract(metadata, '$.source_line')=?
+                    ORDER BY updated DESC, id LIMIT 1""",
+                    (project, result['scene'], result['scene_source_line'])).fetchone()
+            if design:
+                stage = json.loads(design['metadata'])
+                authored = require_text(data, 'brief').strip()
+                context['scene_design_id'] = design['id']
+                if kind == 'background':
+                    result['prompt'] = ', '.join(part for part in (ASSET_FRAMING[kind], stage['background_prompt'], authored) if part)
+                elif cg_id := stage.get('cg_design_ids', {}).get(f'cg-{result["source_line"]}'):
+                    cg = self.resources.library.get('cg-design', cg_id)['metadata']
+                    trigger = require_text(data, 'trigger').strip()
+                    result['prompt'] = ', '.join(part for part in (trigger, ASSET_FRAMING[kind], cg['prompt'], authored) if part)
+                    context['cg_design_id'] = cg_id
+        if project and kind == 'sprite':
+            actor = require_text(data, 'actor').strip() or result['speaker']
+            if actor:
+                with self.resources.library.connection() as db:
+                    person = db.execute("""SELECT id, metadata FROM records WHERE kind='character-design'
+                        AND project_id=? AND label=? ORDER BY updated DESC, id LIMIT 1""", (project, actor)).fetchone()
+                if person:
+                    role = json.loads(person['metadata']).get('role')
+                    if role in ('secondary', 'unreviewed'):
+                        status = '次要角色' if role == 'secondary' else '待定角色'
+                        raise ValueError(f'「{actor}」是{status}，未进入立绘制作名单。')
+                    context['character_design_id'] = person['id']
+                context['actor'] = actor
+        scenario_id = self.resources.document('scenario', data.get('scenario'), project=project)
         prompt_id = self.resources.prompt(result['prompt'], result['negative'],
                                           source=scenario_id, context=context, project=project)
         return dict(result, prompt_id=prompt_id, scenario_id=scenario_id)

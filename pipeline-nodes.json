@@ -316,40 +316,62 @@
   {
     "id": "content-overview",
     "title": "内容总览",
-    "kind": "plan",
+    "kind": "live",
     "input": "完整的 Scenario。",
-    "output": "拟整理时空范围、地点、世界观和作品基调。",
+    "output": "作品简介、背景风格、CG 风格与音乐生成总提示词。",
     "depends_on": [
       "scenario"
     ],
     "reuse": [
-      "source",
-      "asset"
+      "work-style"
     ],
     "reuse_workspace": "assets",
     "reuse_label": "导入已有素材",
     "panels": [
-      "asset-panel"
+      "production-registry"
     ]
   },
   {
     "id": "background-assets",
-    "title": "背景需求整理",
-    "kind": "plan",
-    "input": "内容总览以及场景地点、时间和构图要求。",
-    "output": "拟形成可复用的场景背景需求。",
+    "title": "场景背景",
+    "kind": "live",
+    "input": "作品整体风格和 Scenario 的场景声明。",
+    "output": "每场的背景提示词和场景 BGM 需求，分别供背景生成和音乐生成使用。",
     "depends_on": [
       "content-overview"
     ],
     "reuse": [
+      "scene-design",
       "prompt",
       "asset"
     ],
     "reuse_workspace": "assets",
     "reuse_label": "导入已有素材",
     "panels": [
-      "asset-panel"
+      "production-registry"
     ]
+  },
+  {
+    "id": "background-generation",
+    "title": "背景生成",
+    "kind": "live",
+    "input": "场景背景节点传入的背景提示词。",
+    "output": "用本地模型或 Provider 生成背景候选图，从候选中选用实际图片。",
+    "depends_on": [
+      "background-assets"
+    ],
+    "required_output": "image",
+    "reuse": [
+      "artifact",
+      "asset"
+    ],
+    "panels": [
+      "background-generation-input",
+      "image-status",
+      "image-form",
+      "image-results"
+    ],
+    "retry_control": "image-generate"
   },
   {
     "id": "music-reference",
@@ -370,41 +392,42 @@
   },
   {
     "id": "music-assets",
-    "title": "音乐与音效生成",
+    "title": "音乐生成",
     "kind": "plan",
-    "input": "场景情绪、音效需求和音乐参考。",
-    "output": "拟保存音频生成参数和候选文件。",
+    "input": "内容总览的整体曲风、场景背景的 BGM 需求、角色概览的角色曲参考。",
+    "output": "按作品曲风、场景和角色制作音乐，并记录音频生成参数和候选文件。",
     "depends_on": [
       "content-overview",
-      "music-reference"
+      "background-assets",
+      "character-overview"
     ],
     "reuse": [
+      "scene-design",
       "asset",
       "artifact"
     ],
     "reuse_workspace": "assets",
     "reuse_label": "导入已有素材",
     "panels": [
-      "asset-panel"
+      "production-registry"
     ]
   },
   {
     "id": "character-overview",
     "title": "角色概览",
-    "kind": "plan",
+    "kind": "live",
     "input": "Scenario 中角色相关的行动、对白、称谓和关系。",
-    "output": "拟整理角色身份、外观和声音线索。",
+    "output": "已登记角色、原文外貌与性格依据，以及是否进入立绘制作。",
     "depends_on": [
       "scenario"
     ],
     "reuse": [
-      "source",
-      "asset"
+      "character-design"
     ],
     "reuse_workspace": "assets",
     "reuse_label": "导入已有素材",
     "panels": [
-      "asset-panel"
+      "production-registry"
     ]
   },
   {
@@ -428,19 +451,21 @@
     "id": "portrait-baseline",
     "title": "角色基准立绘",
     "kind": "plan",
-    "input": "角色概览、作者参考及独立生成的候选。",
+    "input": "角色概览中的立绘对象、作者参考及独立生成的候选。",
     "output": "拟把人工确认的角色外观、画布和站位登记为可引用的 CharaDesign 母版。",
     "depends_on": [
       "character-overview",
       "character-reference"
     ],
     "reuse": [
+      "character-design",
       "asset",
       "artifact"
     ],
     "reuse_workspace": "assets",
     "reuse_label": "导入已有素材",
     "panels": [
+      "production-registry",
       "asset-panel"
     ]
   },
@@ -460,17 +485,19 @@
     "reuse_workspace": "assets",
     "reuse_label": "导入已有素材",
     "panels": [
+      "production-registry",
       "asset-panel"
     ]
   },
   {
     "id": "cg-assets",
-    "title": "CG 一致性",
-    "kind": "plan",
-    "input": "已确认的角色母版、场景与动作要求。",
-    "output": "拟登记 CG 使用的角色外观和参考版本。",
+    "title": "事件 CG",
+    "kind": "partial",
+    "input": "Scenario 中已登记的事件 CG 构图、演出理由与提示词。",
+    "output": "事件 CG 图片。选用实际图片后可通过。",
+    "required_output": "image",
     "depends_on": [
-      "portrait-baseline"
+      "scenario"
     ],
     "reuse": [
       "asset",
@@ -479,6 +506,7 @@
     "reuse_workspace": "assets",
     "reuse_label": "导入已有素材",
     "panels": [
+      "production-registry",
       "asset-panel"
     ]
   },

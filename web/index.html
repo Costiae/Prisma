@@ -77,6 +77,18 @@
       </nav>
     </aside>
     <main class="workspace-main" aria-labelledby="workspace-title">
+      <div hidden>
+        <section id="production-registry" class="panel" aria-labelledby="production-registry-title">
+          <h2 id="production-registry-title">制作资源</h2>
+          <p id="production-registry-status" class="hint" role="status"></p>
+          <div id="production-registry-items"></div>
+        </section>
+        <section id="background-generation-input" class="panel" aria-labelledby="background-generation-title">
+          <h2 id="background-generation-title">场景背景提示词</h2>
+          <label class="studio-field">场景<select id="background-generation-scene"></select></label>
+          <p id="background-generation-status" class="hint" role="status"></p>
+        </section>
+      </div>
       <header class="workspace-toolbar">
         <div class="workspace-heading">
           <h1 id="workspace-title">项目库</h1>
@@ -463,6 +475,19 @@
         <textarea aria-label="原文" id="raw" spellcheck="false" placeholder="粘贴小说文本，或导入 UTF-8 文件。"></textarea>
         <p class="hint raw-append-hint">追加会保留已有原文并自动写入历史；已有 Scenario 不会自动改变。</p>
         <div id="scenario-draft-controls">
+        <section class="generation-request-log" aria-labelledby="production-batch-title">
+          <h3 id="production-batch-title">按章制作</h3>
+          <p id="production-batch-summary" class="hint" role="status">读取原文章节…</p>
+          <div class="studio-grid">
+            <label>起始章节<select id="production-batch-start"></select></label>
+            <label>章数<input id="production-batch-count" type="number" min="1" max="12" value="1"></label>
+          </div>
+          <div class="studio-actions">
+            <button id="production-batch-run" class="primary" type="button">生成制作稿</button>
+            <button id="production-batch-open" type="button" hidden>登记并在 IDE 打开</button>
+            <a href="#script-ide-workspace">打开脚本 IDE</a>
+          </div>
+        </section>
         <label class="studio-field">执行方式<select id="scenario-run-mode"><option value="rules">本地规则解析</option><option value="openai-compatible">Provider</option></select></label>
         <fieldset id="scenario-run-parameters" class="studio-grid" hidden disabled>
           <legend class="sr-only">当前试跑参数</legend>

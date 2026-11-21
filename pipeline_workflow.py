@@ -43,6 +43,8 @@ def compile_roadmap(nodes):
         reuse = node.get('reuse', ['source', 'asset'])
         if not isinstance(reuse, list) or any(kind not in REFERENCE_KINDS for kind in reuse):
             raise ValueError(f'{ident} 含有无效的可复用产物类别。')
+        if node.get('required_output') not in (None, 'image'):
+            raise ValueError(f'{ident} 的必需产物类别无效。')
         snapshot = node.get('snapshot')
         if snapshot is not None and (not isinstance(snapshot, str) or snapshot not in SNAPSHOT_KINDS):
             raise ValueError(f'{ident} 的快照类别无效。')
@@ -103,6 +105,13 @@ def short_text(value, limit, name):
     return value.strip()
 
 
+def is_image_output(record):
+    metadata = record['metadata']
+    return record['available'] is True and (
+        record['kind'] == 'asset' and metadata.get('media_type', '').startswith('image/')
+        or record['kind'] == 'artifact' and metadata.get('category') == 'images')
+
+
 class PipelineWorkflow:
     def __init__(self, resources):
         self.resources = resources
@@ -137,7 +146,7 @@ class PipelineWorkflow:
         for source in UPSTREAM[node]:
             if version := heads.get(source):
                 entry = self._entry(project, version)
-                if entry['status'] == 'released' and node in entry['targets']:
+                if entry['status'] == 'released':
                     releases[source] = entry
         return releases
 
@@ -154,8 +163,38 @@ class PipelineWorkflow:
         node = node_id(data.get('node'))
         with self.resources.lock:
             self._project(project)
-            incoming = self._incoming(project, self._heads(project), node)
-        return {'project_id': project, 'node': node, 'inputs': list(incoming.values())}
+            heads = self._heads(project)
+            incoming = self._incoming(project, heads, node)
+            result = {'project_id': project, 'node': node, 'inputs': list(incoming.values())}
+            if ('background-assets' in UPSTREAM[node] and 'background-assets' not in incoming
+                    and (version := heads.get('background-assets'))):
+                background = self._entry(project, version)
+                if background['status'] in ('pending', 'refine'):
+                    refs = [ref for ref in background['references'] if ref['kind'] == 'scene-design']
+                    if refs:
+                        result['draft_scene_background'] = {'id': version, 'references': refs}
+            if node == 'music-assets':
+                music_inputs = dict(incoming)
+                if draft := result.get('draft_scene_background'):
+                    music_inputs['background-assets'] = draft
+                result['music_briefs'] = self._music_briefs(music_inputs)
+        return result
+
+    def _music_briefs(self, incoming):
+        groups = {}
+        for source, kind in (('content-overview', 'work-style'), ('background-assets', 'scene-design'),
+                             ('character-overview', 'character-design')):
+            records = [self.library.get(kind, ref['id'])
+                       for ref in incoming.get(source, {}).get('references', []) if ref['kind'] == kind]
+            if kind == 'work-style':
+                groups[source] = [{'label': row['label'], 'style': row['metadata']['music']} for row in records]
+            elif kind == 'scene-design':
+                groups[source] = [{'label': row['label'], 'scene': row['metadata']['id'],
+                                   'cues': row['metadata'].get('music', [])} for row in records]
+            else:
+                groups[source] = [{'label': row['label'], 'traits': row['metadata'].get('traits', [])}
+                                  for row in records if row['metadata'].get('role') == 'primary']
+        return groups
 
     def approved(self, data):
         """Read the current passed outputs without copying their resources."""
@@ -170,8 +209,7 @@ class PipelineWorkflow:
                 if entry['status'] != 'released' or (selected and node != selected):
                     continue
                 incoming = {source: entries[source]['id'] for source in UPSTREAM[node]
-                            if source in entries and entries[source]['status'] == 'released'
-                            and node in entries[source]['targets']}
+                            if source in entries and entries[source]['status'] == 'released'}
                 references = {(ref['kind'], ref['id']): ref for ref in entry['references']}
                 for ref in entry['references']:
                     if ref['kind'] == 'revision':
@@ -197,6 +235,8 @@ class PipelineWorkflow:
             for item in (*owned, *shared):
                 if item['available'] is False or item['state'] in ('not_installed', 'running', 'cancelling', 'failed', 'cancelled', 'interrupted'):
                     continue
+                if NODES[node].get('required_output') == 'image' and not is_image_output(self.library.get(kind, item['id'])):
+                    continue
                 items[kind, item['id']] = {
                     'kind': kind, 'id': item['id'], 'label': item['label'], 'shared': item['project_id'] is None,
                 }
@@ -211,6 +251,7 @@ class PipelineWorkflow:
         if type(capture) is not bool:
             raise ValueError('是否关联当前项目版本须为布尔值。')
         result = {}
+        has_image = False
         for item in references:
             if (not isinstance(item, dict) or item.get('kind') not in REFERENCE_KINDS
                     or not isinstance(item.get('id'), str) or not 0 < len(item['id']) <= 300):
@@ -221,6 +262,7 @@ class PipelineWorkflow:
                 raise ValueError('关联产物属于其他项目。')
             if node == 'script' and kind == 'script' and 'managed_assets' in record['metadata']:
                 require_project_start(record['metadata'])
+            has_image = has_image or is_image_output(record)
             result[kind, ident] = {'kind': kind, 'id': ident, 'label': record['label']}
         if capture:
             kind = SNAPSHOT_KINDS.get(NODES[node].get('snapshot'))
@@ -234,6 +276,8 @@ class PipelineWorkflow:
             record = self.library.get(kind, ident)
             result = {key: ref for key, ref in result.items() if ref['kind'] != kind}
             result[kind, ident] = {'kind': kind, 'id': ident, 'label': record['label']}
+        if NODES[node].get('required_output') == 'image' and not has_image:
+            raise ValueError('请选用一张可用的实际图片后再通过。')
         return list(result.values())
 
     def _append(self, project, heads, node, event):

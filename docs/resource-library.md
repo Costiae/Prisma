@@ -1,5 +1,15 @@
 # Prisma 资源目录
 
+## 按章制作 Scenario
+
+从 Scenario 节点的「按章制作」读取保存过的原文章节。程序保留原文字句和行号，模型输出编号锚定的场景、说话人、视角、表情、音乐和事件 CG 标注，以及角色的叙事分级。成功批次按输入、模型和参数记录，可用同样参数接着处理。已生成的制作稿从脚本 IDE 审查。源树中的 `production/scenario.json` 是可移植 Scenario，`production/staging.json` 保留演出标注与角色分级，Ren’Py 源码把标注放在对应台词或叙述之前。
+
+作品风格、角色设计、场景与事件 CG 声明属于当前项目。背景提示词结合场景声明和作品风格。同一场的音乐切换和事件 CG 都保留原文起点和理由。CG 只为有代表性、情绪强烈且有画面表现力的瞬间声明，制作提示词结合事件构图和 CG 整体风格。角色仅短暂出场且对主线影响有限时，可标为次要角色。次要和待定角色保留对白与角色记录，制作名单只包含明确进入立绘流程的角色。
+
+`scenario_production_review` 的 `cg` 是当前制作稿的完整 CG 列表，每条填写原文行 `at`、`title`、`composition` 和 `reason`。省略 `cg` 会沿用已有标记，传空列表可清空。通过 `character_roles` 按已登记名称填写 `role` 和 `reason`，分级允许 `primary`、`secondary`、`unreviewed`。发布后可用 `scenario_production_registry` 的 `cg-design` 查看 CG 声明，或用 `character-design` 加 `portraits_only: true` 读取立绘制作名单。在验证一份模型制作稿后，可用 `scenario_production_defaults_save` 保存该次模型和实际参数。
+
+「场景背景」传出背景提示词和场景 BGM 需求。「背景生成」用 `pipeline_inputs` 读取已通过的场景背景，或从 `draft_scene_background` 选用场景草稿。通过 `scenario_background_prompt` 载入提示词，把返回的 `prompt_id` 随 `image_generate` 提交。背景生成和事件 CG 节点通过时须关联已可用的图片文件。「音乐生成」的 `pipeline_inputs` 提供整体曲风、场景 BGM 和角色曲参考。场景 BGM 草稿可以在背景出图前试用。
+
 每个 Prisma 工作目录有自己的 `catalog.sqlite3`，默认位于 `build/prisma-images/`。项目、剧本、演出绑定、提示词、素材、工具、模型、训练数据、任务和导出使用同一个目录。SQLite 保存可搜索的记录和关系，任务的完整参数及日志可通过任务 ID 查看。
 
 每条资源有一个可空的 `project_id`。打开项目后，资源目录和任务历史按项目查询。底模和工具使用共享目录，图像工作室的训练和生成选择器也可使用共享数据集与 LoRA。将共享素材加入项目或另存项目时，会登记该项目的素材记录。相同的媒体内容共用原文件。

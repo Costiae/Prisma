@@ -2,7 +2,8 @@
   const kinds = {live: '已接通', partial: '手动处理', plan: '尚未接入', reference: '参考输入'};
   const resourceNames = {source: '原文', scenario: '剧本', cues: '演出', prompt: '提示词',
     asset: '素材', job: '任务', artifact: '产物', model: '模型', lora: 'LoRA',
-    dataset: '数据集', revision: '项目版本', export: '导出', tool: '工具', script: '脚本'};
+    dataset: '数据集', revision: '项目版本', export: '导出', tool: '工具', script: '脚本',
+    'work-style': '作品风格', 'scene-design': '场景背景', 'character-design': '角色'};
   let state;
   let catalog = [];
   let catalogKey = '';
@@ -36,7 +37,7 @@
   const outgoing = (node) => state?.roadmap.edges.filter((edge) => edge.source === node) || [];
   const release = (edge) => {
     const item = head(edge.source);
-    return item?.status === 'released' && item.targets.includes(edge.target) ? item : null;
+    return item?.status === 'released' ? item : null;
   };
 
   function inputVersionsChanged(node, item = head(node)) {
@@ -49,6 +50,7 @@
   function nodeStatus(node) {
     const item = head(node);
     const live = currentOutput(node);
+    if (nodesById.get(node)?.required_output === 'image' && item?.status === 'refine' && !live) return '未完成';
     if (live?.pending || ['pending', 'refine'].includes(item?.status)) return '进行中';
     if (item?.status === 'released') {
       if (inputVersionsChanged(node, item)) return live ? '进行中' : '未完成';
@@ -561,6 +563,8 @@
     const content = draft().content.trim();
     const payload = content ? {content} : {};
     const resource = pickedResource();
+    if (nodesById.get(node)?.required_output === 'image' && !resource && !live?.reference
+        && previous?.status !== 'released') return {};
     if (resource) payload.references = [{kind: resource.kind, id: resource.id}];
     else if (node === 'scenario' && live?.reference) payload.references = [live.reference];
     else if (live?.captureProject || (readySnapshot(node) && !inputsChanged)) payload.capture_project = true;
@@ -674,6 +678,9 @@
     }
     if (definition?.id === 'prompt' && field('image-prompt').value.trim()) {
       slot.append(element('p', '通过后可把提示词传给下游图像生成。', 'hint'));
+    }
+    if (definition?.required_output === 'image' && !live?.reference && head(definition.id)?.status !== 'released') {
+      slot.append(element('p', '选用一张实际图片后即可通过。', 'hint'));
     }
   }
 

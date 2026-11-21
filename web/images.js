@@ -26,7 +26,14 @@
   const uploadedCaptions = new Map();
   let lastGallery = '';
   let selectedPrompt = null;
+  let backgroundPrompt = null;
+  let backgroundSelection = null;
+  let otherPrompt = null;
   let appliedDefaults = '';
+  const backgroundScene = field('background-generation-scene');
+  const backgroundStatus = field('background-generation-status');
+  const inBackgroundNode = () => !field('pipeline-stage').hidden
+    && field('pipeline-stage').dataset.node === 'background-generation';
 
   function report(text, error = false) {
     for (const element of [get('status'), field('toolkit-status')]) {
@@ -134,7 +141,8 @@
             : '新环境请展开本地工具箱，拉取推理组件或完整 LoRA 工具链。')
       : (onlineProvider ? `将通过 ${onlineProvider.name} 调用 ${chosenOnline.model}。`
         : '请在此选择可用模型，或在「API Provider」设置全局默认图像模型。');
-    get('generate').disabled = working || !ready;
+    get('generate').disabled = working || !ready
+      || (inBackgroundNode() && (!backgroundPrompt || selectedPrompt !== backgroundPrompt));
     get('export-lora').disabled = exportingLora || !value('lora');
     get('use-existing-lora').disabled = !value('existing-lora-select');
     get('install').disabled = working || !environment?.supported || Boolean(environment.engine && environment.model);
@@ -355,6 +363,14 @@
       pending, label: completed ? '已完成的生成任务' : '',
       reference: completed ? {kind: 'job', id: job.id} : null,
     } : null);
+    const background = job?.kind === 'generate' && job.options.scene_design_id;
+    if (background) {
+      const chosen = backgroundSelection?.job === job.id ? backgroundSelection.name
+        : job.images?.length === 1 ? job.images[0].name : '';
+      reportNodeOutput('background-generation', {
+        pending, reference: completed && chosen ? {kind: 'artifact', id: `${job.id}/images/${chosen}`} : null,
+      });
+    }
     reportNodeOutput('candidates', job?.kind === 'generate' ? {
       pending, label: completed && job.images?.length ? `${job.images.length} 张候选图` : '',
       reference: completed && job.images?.length === 1
@@ -419,6 +435,17 @@
       save.download = name;
       save.textContent = '下载';
       actions.append(add, save);
+      if (background) {
+        const choose = document.createElement('button');
+        choose.type = 'button';
+        choose.textContent = '选为背景成果';
+        choose.onclick = () => {
+          backgroundSelection = {job: job.id, name: item.name};
+          reportNodeOutput('background-generation', {reference: {kind: 'artifact', id: `${job.id}/images/${item.name}`}});
+          report('已选定背景候选图，可在背景生成节点通过。');
+        };
+        actions.append(choose);
+      }
       card.append(preview, caption, actions);
       gallery.append(card);
     }
@@ -538,9 +565,11 @@
 
   async function submitJob(route, data) {
     submitting = true;
+    const background = route === '/generate' && inBackgroundNode();
     const node = route === '/generate' ? 'generation' : route === '/train' ? 'train' : null;
     const project = openProject?.id;
     if (node) reportNodeOutput(node, {pending: true});
+    if (background) reportNodeOutput('background-generation', {pending: true});
     controls();
     try {
       const job = await json(route, data);
@@ -551,6 +580,7 @@
       await refresh(job.id);
     } catch (error) {
       if (node && project === openProject?.id && !activeJob) reportNodeOutput(node, null);
+      if (background && project === openProject?.id && !activeJob) reportNodeOutput('background-generation', null);
       report(error.message, true);
       if (activeJob) schedulePoll();
     } finally {
@@ -670,6 +700,9 @@
   };
   get('form').onsubmit = (event) => {
     event.preventDefault();
+    if (inBackgroundNode() && (!backgroundPrompt || selectedPrompt !== backgroundPrompt)) {
+      return report('请先载入一个场景的背景提示词。', true);
+    }
     const data = {mode: mode(), prompt: value('prompt'), count: numeric('count')};
     if (selectedPrompt) data.prompt_id = selectedPrompt;
     if (openProject) data.project_id = openProject.id;
@@ -1054,6 +1087,57 @@
     } catch (error) { report(error.message, true); }
   }
   document.addEventListener('prisma-node-use-prompt', (event) => usePassedPrompt(event.detail));
+  backgroundScene.onchange = async () => {
+    const project = openProject?.id;
+    const id = backgroundScene.value;
+    backgroundPrompt = null;
+    selectedPrompt = null;
+    get('prompt').value = '';
+    controls();
+    if (!id) {
+      backgroundStatus.textContent = '「场景背景」还没有可用的提示词。';
+      return;
+    }
+    backgroundStatus.textContent = '正在载入提示词…';
+    try {
+      const response = await request('/api/scenario/background-prompt', {project_id: project, id});
+      const result = await response.json();
+      if (openProject?.id !== project || !inBackgroundNode() || backgroundScene.value !== id) return;
+      backgroundPrompt = selectedPrompt = result.prompt_id;
+      get('prompt').value = result.prompt;
+      get('negative').value = result.negative;
+      backgroundStatus.textContent = backgroundScene.dataset.draft === 'true' ? '当前提示词来自场景背景草稿。' : '';
+    } catch (error) {
+      if (openProject?.id === project && inBackgroundNode() && backgroundScene.value === id) {
+        backgroundStatus.textContent = error.message;
+      }
+    } finally { controls(); }
+  };
+  async function loadBackgroundScenes() {
+    const project = openProject?.id;
+    const previous = backgroundScene.value;
+    const approved = nodeInputs.filter((item) => item.kind === 'scene-design');
+    backgroundScene.replaceChildren();
+    backgroundScene.disabled = true;
+    backgroundPrompt = null;
+    selectedPrompt = null;
+    get('prompt').value = '';
+    backgroundStatus.textContent = '正在读取场景…';
+    controls();
+    try {
+      const draft = approved.length ? null : (await (await request('/api/pipeline/inputs',
+        {project_id: project, node: 'background-generation'})).json()).draft_scene_background;
+      if (openProject?.id !== project || !inBackgroundNode()) return;
+      const scenes = draft?.references || approved;
+      backgroundScene.dataset.draft = String(Boolean(draft));
+      backgroundScene.replaceChildren(...scenes.map((item, index) => new Option(`${index + 1} · ${item.label}`, item.id)));
+      backgroundScene.disabled = !scenes.length;
+      if (scenes.some((item) => item.id === previous)) backgroundScene.value = previous;
+      await backgroundScene.onchange();
+    } catch (error) {
+      if (openProject?.id === project && inBackgroundNode()) backgroundStatus.textContent = error.message;
+    }
+  }
   async function usePassedDataset(reference) {
     const project = openProject?.id;
     try {
@@ -1073,7 +1157,11 @@
     } else report('该 LoRA 当前不可用。请刷新权重列表。', true);
   });
   document.addEventListener('prisma-node-tools', ({detail}) => {
-    if (catalog && ['generation', 'train'].includes(detail)) applyProjectDefaults();
+    if (catalog && ['generation', 'background-generation', 'train'].includes(detail)) applyProjectDefaults();
+    if (detail === 'background-generation') {
+      otherPrompt ??= {id: selectedPrompt, text: value('prompt'), negative: value('negative')};
+      loadBackgroundScenes();
+    }
     if (detail === 'generation') {
       const ref = nodeInputs.find((item) => item.kind === 'prompt');
       if (ref) usePassedPrompt(ref, {onlyEmpty: true});
@@ -1090,6 +1178,14 @@
       if (ref) usePassedDataset(ref);
     }
     if (field('stage-tools').contains(get('library'))) loadLibrary();
+  });
+  document.addEventListener('prisma-before-view-change', ({detail}) => {
+    if (detail === 'background-generation' || !otherPrompt) return;
+    selectedPrompt = otherPrompt.id;
+    get('prompt').value = otherPrompt.text;
+    get('negative').value = otherPrompt.negative;
+    otherPrompt = backgroundPrompt = null;
+    queueMicrotask(controls);
   });
   document.addEventListener('prisma-view-change', (event) => {
     if (event.detail === 'assets') loadLibrary();
@@ -1116,6 +1212,9 @@
     scope.querySelector('option[value="current"]').disabled = !openProject;
     scope.value = openProject ? 'current' : 'shared';
     selectedPrompt = null;
+    backgroundPrompt = null;
+    backgroundSelection = null;
+    otherPrompt = null;
     appliedDefaults = '';
     get('prompt').value = '';
     get('negative').value = get('negative').defaultValue;

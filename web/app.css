@@ -295,6 +295,12 @@ button.project-card-open:hover:not(:disabled) { border-color: transparent; backg
 .generation-request-log ol:empty { display: none; }
 .generation-request-log li + li { margin-top: 4px; }
 .generation-request-log time { color: var(--muted); font-variant-numeric: tabular-nums; }
+#production-batch-title { margin: 0; }
+#production-batch-title ~ .studio-actions { margin-top: 12px; }
+#production-registry-items { display: grid; gap: 8px; }
+#production-registry-items details { padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+#production-registry-items summary { cursor: pointer; font-weight: 650; }
+.production-record { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0; }
 #scenario-response-preview { margin-top: 12px; }
 #scenario-response-preview summary { cursor: pointer; color: var(--accent); }
 #scenario-response-preview pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 12px;
@@ -446,6 +452,7 @@ button.project-card-open:hover:not(:disabled) { border-color: transparent; backg
 .node-workspace[data-node="raw"] #scenario-draft-controls,
 .node-workspace[data-node="online"] :is(#image-prompt-tools, .image-submit) { display: none; }
 .node-workspace[data-node="online"] #image-form { grid-column: 1 / -1; }
+.node-workspace[data-node="background-generation"] .prompt-actions { display: none; }
 .node-output > .hint { margin: 6px 0 10px; }
 .node-actionbar {
   position: sticky; bottom: 0; z-index: 4; display: flex; flex-wrap: wrap;

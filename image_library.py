@@ -7,7 +7,8 @@ import sqlite3
 
 
 KINDS = ('project', 'revision', 'source', 'scenario', 'cues', 'prompt', 'script', 'script-draft', 'asset',
-         'tool', 'model', 'lora', 'dataset', 'job', 'artifact', 'export', 'pipeline', 'node-version', 'handoff')
+         'tool', 'model', 'lora', 'dataset', 'job', 'artifact', 'export', 'pipeline', 'node-version', 'handoff',
+         'production-plan', 'production-default', 'production-checkpoint', 'character-design', 'scene-design', 'cg-design', 'work-style')
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS records (

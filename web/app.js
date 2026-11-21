@@ -733,6 +733,121 @@ function download(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+const productionRegistryNodes = {'content-overview': ['work-style', '作品风格'],
+  'character-overview': ['character-design', '角色登记'], 'background-assets': ['scene-design', '场景背景'],
+  'music-assets': ['music', '音乐制作输入'], 'cg-assets': ['cg-design', '事件 CG 声明'],
+  'portrait-baseline': ['character-design', '立绘制作名单'],
+  'sprite-assets': ['character-design', '立绘差分对象']};
+const productionRoleLabels = {primary: '立绘角色', secondary: '次要角色', unreviewed: '待定'};
+let productionDraft = null;
+let productionScope = '';
+document.addEventListener('prisma-project-change', () => {
+  productionScope = '';
+  productionDraft = null;
+  field('production-batch-open').hidden = true;
+});
+
+document.addEventListener('prisma-node-tools', async ({detail}) => {
+  const project = openProject?.id;
+  if (!project) return;
+  const route = productionRegistryNodes[detail];
+  if (route) {
+    const [kind, title] = route;
+    const output = field('production-registry-items');
+    const status = field('production-registry-status');
+    field('production-registry-title').textContent = title;
+    output.replaceChildren();
+    status.textContent = '正在读取资源…';
+    try {
+      const portraits_only = detail === 'portrait-baseline' || detail === 'sprite-assets';
+      const result = kind === 'music'
+        ? await (await request('/api/pipeline/inputs', {project_id: project, node: detail})).json()
+        : await (await request('/api/scenario/production/registry', {project_id: project, kind, portraits_only})).json();
+      if (openProject?.id !== project || field('pipeline-stage').dataset.node !== detail) return;
+      if (kind === 'music') {
+        const inputs = result.music_briefs;
+        const music = [
+          ['整体曲风', inputs['content-overview'].map(({style}) => style)],
+          [result.draft_scene_background ? '场景 BGM（草稿）' : '场景 BGM', inputs['background-assets'].filter(({cues}) => cues.length)
+            .map(({label, scene, cues}) => `${scene} · ${label}\n${cues.map((cue) => `原文 ${cue.at} · ${cue.direction}`).join('\n')}`)],
+          ['角色曲参考', inputs['character-overview'].map(({label, traits}) => [label, ...traits].join(' · '))],
+        ];
+        status.textContent = '';
+        for (const [label, entries] of music) {
+          const section = document.createElement('details');
+          const heading = document.createElement('summary');
+          heading.textContent = label + ' · ' + entries.length + ' 条';
+          const body = document.createElement('pre');
+          body.className = 'production-record';
+          body.textContent = entries.join('\n\n') || '暂无已通过的输入。';
+          section.append(heading, body);
+          output.append(section);
+        }
+        return;
+      }
+      status.textContent = result.items.length ? result.items.length + ' 条记录' : '当前项目暂无记录。';
+      for (const item of result.items) {
+        const section = document.createElement('details');
+        const heading = document.createElement('summary');
+        const meta = item.metadata;
+        const role = productionRoleLabels[meta.role] || productionRoleLabels.unreviewed;
+        heading.textContent = kind === 'character-design' && !portraits_only ? item.label + ' · ' + role : item.label;
+        const body = document.createElement('pre');
+        body.className = 'production-record';
+        const selected = kind === 'scene-design' ? {场景: meta.id, 原文起点: meta.source_line,
+          背景提示词: meta.background_prompt, 场景BGM: meta.music}
+          : kind === 'cg-design' ? {场景: meta.scene + ' · ' + meta.place, 原文行: meta.at,
+            构图: meta.composition, 演出依据: meta.reason, 制作提示词: meta.prompt}
+          : kind === 'character-design' ? {分级: role, 分级依据: meta.role_reason,
+            外貌: meta.appearance, 性格: meta.traits, 原文: meta.source_lines, 立绘提示词: meta.prompt}
+          : {简介: meta.summary, 背景: meta.background, 音乐: meta.music, CG: meta.cg};
+        body.textContent = Object.entries(selected).filter(([, value]) => value != null && value !== '').map(([label, value]) =>
+          label + '\n' + (typeof value === 'string' ? value : JSON.stringify(value, null, 2))).join('\n\n');
+        section.append(heading, body);
+        output.append(section);
+      }
+    } catch (error) { if (openProject?.id === project) status.textContent = error.message; }
+  }
+  if (detail !== 'scenario' || productionScope === project) return;
+  const summary = field('production-batch-summary');
+  try {
+    const result = await (await request('/api/scenario/production/outline', {project_id: project})).json();
+    if (openProject?.id !== project) return;
+    productionScope = project;
+    field('production-batch-start').replaceChildren(...result.chapters.map((chapter) =>
+      new Option(chapter.number + ' · ' + chapter.title, chapter.number)));
+    field('production-batch-run').disabled = !result.chapters.length;
+    summary.textContent = result.chapters.length
+      ? result.chapters.length + ' 章 · 每批 ' + result.defaults.window + ' 行'
+      : '请先保存原文。';
+  } catch (error) { if (openProject?.id === project) summary.textContent = error.message; }
+});
+
+field('production-batch-run').onclick = (event) => run(event.currentTarget, '正在分批制作 Scenario…', async () => {
+  const scope = projectScope();
+  if (!scope.project_id) return;
+  await flushProjectWrite();
+  const result = await generationRequest('scenario', '/api/scenario/production/generate', {
+    ...scope, chapter_start: Number(field('production-batch-start').value),
+    chapter_count: field('production-batch-count').valueAsNumber,
+    model_override: readProviderRef(field('scenario-run-model').value),
+  });
+  if (scope.project_id !== openProject?.id) return;
+  productionDraft = result.id;
+  field('production-batch-summary').textContent = result.chapters + ' 章 · ' + result.scenes + ' 场 · '
+    + result.lines + ' 行 · CG ' + result.cg + ' 处 · 次要角色 ' + result.secondary_characters
+    + ' 位 · 待确认对白 ' + result.unresolved_dialogue.length + ' 条';
+  field('production-batch-open').hidden = false;
+});
+
+field('production-batch-open').onclick = (event) => run(event.currentTarget, '正在登记并打开 IDE…', async () => {
+  const scope = projectScope();
+  if (!scope.project_id || !productionDraft) return;
+  const head = await (await request('/api/script/editor/open', scope)).json();
+  await request('/api/scenario/production/publish', {...scope, id: productionDraft, base: head.id});
+  if (scope.project_id === openProject?.id) goWorkspace('script-ide-workspace');
+});
+
 let scenarioPlacement = null;
 
 function chapterAndScene(document, id) {
