@@ -89,11 +89,16 @@ class Job:
 
     def phase(self, title):
         self.check()
+        self.log_event(title)
         self.update(phase=title, progress=None)
 
-    def run(self, command, *, cwd=None, env=None):
+    def log_event(self, title):
+        with self.log.open('ab') as stream:
+            stream.write(f'[{now()}] {title}\n'.encode('utf-8'))
+
+    def run(self, command, *, cwd=None, env=None, inherit_env=True):
         # API credentials belong to the server, not the local tools or installers.
-        child_env = {k: v for k, v in os.environ.items() if k.upper() != 'OPENAI_API_KEY'}
+        child_env = {k: v for k, v in os.environ.items() if k.upper() != 'OPENAI_API_KEY'} if inherit_env else {}
         child_env.update(PYTHONUTF8='1', PYTHONUNBUFFERED='1')
         child_env.update(env or {})
         with self.log.open('ab') as stream:
@@ -141,7 +146,7 @@ class Jobs:
     def start(self, kind: str, options: dict, work: Callable):
         with self.lock:
             if self.active is not None and self.active.data['state'] in ACTIVE:
-                raise Busy('有一个图像任务正在运行；完成或取消后即可开始下一个。')
+                raise Busy('已有任务在运行；完成或取消后即可开始下一个。')
             job = self.active = Job(self.root / uuid.uuid4().hex[:16], kind, options, self.index)
             threading.Thread(target=self._run, args=(job, work), daemon=True).start()
             return self.get(job.directory.name)

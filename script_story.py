@@ -11,6 +11,9 @@ LABEL = re.compile(rf'label\s+({NAME})(?:\s*\([^\n]*\))?\s*:\s*(?:#.*)?')
 SAY = re.compile(rf'(?:(?P<speaker>{NAME})\s+)?(?P<literal>{LITERAL})')
 CHOICE = re.compile(rf'({LITERAL}):')
 JUMP = re.compile(rf'jump ({NAME})')
+CALL = re.compile(rf'call ({NAME})')
+SCREEN = re.compile(rf'(show|hide|call) screen ({NAME})')
+PAUSE = re.compile(r'pause (\d+(?:\.\d+)?)')
 CHARACTER = re.compile(rf'define\s+({NAME})\s*=\s*Character\(({LITERAL})\)')
 MEDIA = re.compile(rf'(show expression|play music|play sound|voice) "(prisma_assets/[a-f0-9]{{24}}\.\w+)"(.*)')
 TOKENS = re.compile(
@@ -110,6 +113,12 @@ def _rows(lines, scene, protected):
                     data = {'kind': 'dialogue', 'speaker': match['speaker'] or '', 'content': content}
             if match := JUMP.fullmatch(value):
                 data = {'kind': 'jump', 'target': match[1]}
+            elif match := CALL.fullmatch(value):
+                data = {'kind': 'call', 'target': match[1]}
+            elif match := SCREEN.fullmatch(value):
+                data = {'kind': 'screen', 'action': match[1], 'target': match[2]}
+            elif match := PAUSE.fullmatch(value):
+                data = {'kind': 'pause', 'content': float(match[1])} if len(match[1]) <= 8 else data
             elif value == 'return':
                 data = {'kind': 'return'}
             elif value == 'stop music':
@@ -135,25 +144,84 @@ def _source(data):
     return text, lines, _scenes(lines, protected), protected
 
 
-def inspect_story(data):
-    _, lines, scenes, protected = _source(data)
+def _inspect(lines, scenes, protected, selected, targets):
     names = [scene['name'] for scene in scenes]
-    selected = data.get('scene') or next((name for name in names if name != 'start'), names[0] if names else '')
+    selected = selected or next((name for name in names if name != 'start'), names[0] if names else '')
     scene = next((item for item in scenes if item['name'] == selected), None)
     rows = _rows(lines, scene, protected)[0] if scene else []
     characters = {match[1]: _literal_text(match[2]) or match[1]
                   for index, line in enumerate(lines) if index not in protected and (match := CHARACTER.fullmatch(line))}
     diagnostics = []
-    if names and 'start' not in names:
+    if names and 'start' not in targets:
         diagnostics.append('缺少入口场景 start。')
     if len(names) != len(set(names)):
         diagnostics.append('存在同名场景，请在源码中确认。')
     for row in rows:
-        targets = [row['target']] if row['kind'] == 'jump' else [item['target'] for item in row.get('options', [])]
-        diagnostics.extend(f'第 {row["line"]} 行跳转的场景 {name} 不在脚本中。' for name in targets if name not in names)
+        destinations = [row['target']] if row['kind'] in ('jump', 'call') else [item['target'] for item in row.get('options', [])]
+        diagnostics.extend(f'第 {row["line"]} 行跳转的场景 {name} 不在脚本中。' for name in destinations if name not in targets)
     return {'scenes': [{'name': item['name'], 'line': item['line']} for item in scenes],
             'scene': scene['name'] if scene else '', 'rows': rows, 'characters': characters,
             'diagnostics': diagnostics}
+
+
+def inspect_story(data):
+    _, lines, scenes, protected = _source(data)
+    return _inspect(lines, scenes, protected, data.get('scene'), {item['name'] for item in scenes})
+
+
+def inspect_project_story(files, selected_file=None, selected_scene=None):
+    """List scenes and static branching across the whole game, including cross-file jumps."""
+    scripts = {name: _source({'text': text})[1:] for name, text in sorted(files.items())
+               if name.lower().endswith('.rpy') and not name.lower().startswith('tl/')}
+    scenes = [dict(scene, file=name) for name, (_, index, _) in scripts.items() for scene in index]
+    targets = {scene['name'] for scene in scenes}
+    current = (next((item for item in scenes if item['file'] == selected_file and item['name'] == selected_scene), None)
+               or next((item for item in scenes if item['file'] == selected_file), None)
+               or next((item for item in scenes if item['name'] == 'start'), None)
+               or next(iter(scenes), None))
+    characters = {}
+    branches = []
+    counts = {}
+    for index, scene in enumerate(scenes):
+        counts[scene['name']] = counts.get(scene['name'], 0) + 1
+        lines, _, protected = scripts[scene['file']]
+        rows, _ = _rows(lines, scene, protected)
+        for row in rows:
+            destinations = ([{'target': row['target']}] if row['kind'] in ('jump', 'call') else row.get('options', []))
+            branches.extend({'file': scene['file'], 'source': scene['name'], 'line': row['line'],
+                             'kind': row['kind'], **destination} for destination in destinations)
+        following = scenes[index + 1] if index + 1 < len(scenes) else None
+        if following and following['file'] == scene['file'] and (
+                not rows or rows[-1]['kind'] not in ('jump', 'menu', 'return', 'source')):
+            branches.append({'file': scene['file'], 'source': scene['name'], 'line': scene['end'],
+                             'kind': 'next', 'target': following['name']})
+    for lines, _, protected in scripts.values():
+        for index, text in enumerate(lines):
+            if index not in protected and (match := CHARACTER.fullmatch(text)):
+                characters[match[1]] = _literal_text(match[2]) or match[1]
+    if current:
+        selected = _inspect(*scripts[current['file']], current['name'], targets)
+    else:
+        selected = {'rows': [], 'diagnostics': []}
+    repeated = [name for name, count in counts.items() if count > 1]
+    return {'file': current['file'] if current else '', 'scene': current['name'] if current else '',
+            'scenes': [{key: scene[key] for key in ('name', 'file', 'line')} for scene in scenes],
+            'rows': selected['rows'], 'characters': characters, 'branches': branches,
+            'diagnostics': [*selected['diagnostics'], *(f'存在同名场景「{name}」。' for name in repeated)]}
+
+
+def cut_project_story(files, label):
+    matches = []
+    for name, source in files.items():
+        if not name.lower().endswith('.rpy') or name.lower().startswith('tl/'):
+            continue
+        _, lines, scenes, _ = _source({'text': source})
+        matches.extend((name, lines, scene) for scene in scenes if scene['name'] == label)
+    if len(matches) != 1:
+        raise ValueError(f'发行截止场景「{label}」缺失或重名。')
+    name, lines, scene = matches[0]
+    lines[scene['line']:scene['end']] = ['    $ renpy.full_restart()', '']
+    return dict(files, **{name: '\n'.join(lines)})
 
 
 def _name(value):
@@ -178,8 +246,23 @@ def _statement(row, indent, names):
     if kind == 'dialogue':
         speaker = row.get('speaker', '')
         return [indent + (_name(speaker) + ' ' if speaker else '') + _text(row.get('content'))]
-    if kind == 'jump':
-        return [indent + 'jump ' + target(row.get('target'))]
+    if kind in ('jump', 'call'):
+        return [f'{indent}{kind} {target(row.get("target"))}']
+    if kind == 'screen':
+        action = row.get('action')
+        if action not in ('show', 'hide', 'call'):
+            raise ValueError('请选择显示、隐藏或调用界面。')
+        return [f'{indent}{action} screen {_name(row.get("target"))}']
+    if kind == 'pause':
+        seconds = row.get('content')
+        if type(seconds) not in (int, float) or not 0 <= seconds <= 600:
+            raise ValueError('等待时间须为 0–600 秒。')
+        return [f'{indent}pause {seconds:.3f}']
+    if kind == 'transition':
+        transition = row.get('content')
+        if transition not in ('pass', 'with dissolve', 'with fade', 'with None'):
+            raise ValueError('请选择过渡方式。')
+        return [indent + transition]
     if kind == 'menu':
         options = row.get('options')
         if not isinstance(options, list) or not 1 <= len(options) <= 12 or not all(isinstance(item, dict) for item in options):
@@ -194,7 +277,7 @@ def _statement(row, indent, names):
     raise ValueError('这种语句请在源码视图编辑。')
 
 
-def edit_story(data, prepare_asset):
+def edit_story(data, prepare_asset, project_targets=()):
     text, lines, scenes, protected = _source(data)
     operation = data.get('operation')
     names = [scene['name'] for scene in scenes]
@@ -222,6 +305,19 @@ def edit_story(data, prepare_asset):
         raise ValueError('请选择唯一的场景。')
     rows, indent = _rows(lines, scene, protected)
     row = next((entry for entry in rows if entry['line'] == data.get('line')), None)
+    if operation in ('move_up', 'move_down'):
+        if row not in rows:
+            raise ValueError('请选择有效的剧情行。')
+        index = rows.index(row)
+        neighbor = index + (-1 if operation == 'move_up' else 1)
+        if not 0 <= neighbor < len(rows):
+            raise ValueError('剧情行已在场景的边缘。')
+        first, second = sorted((row, rows[neighbor]), key=lambda item: item['line'])
+        if any(item['kind'] == 'source' for item in (first, second)):
+            raise ValueError('请在源码中移动自定义语句。')
+        start, middle = first['line'] - 1, second['line'] - 1
+        lines[start:second['end']] = [*lines[middle:second['end']], *lines[first['end']:middle], *lines[start:first['end']]]
+        return {'text': '\n'.join(lines), 'scene': name}
     if operation not in ('insert', 'replace', 'delete') or (row is None and (operation != 'insert' or 'line' in data)):
         raise ValueError('请选择有效的操作与脚本行。')
     if row and operation in ('replace', 'delete') and row['kind'] == 'source':
@@ -244,7 +340,7 @@ def edit_story(data, prepare_asset):
             replacement = [indent + snippet]
             assets[asset['path']] = asset['asset_id']
         else:
-            replacement = _statement(insert, indent, names)
+            replacement = _statement(insert, indent, {*names, *project_targets})
     if row:
         start = row['line'] - 1
         end = start if operation == 'insert' else row['end']

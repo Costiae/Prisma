@@ -2,6 +2,11 @@
 
 import base64
 from dataclasses import asdict
+from hashlib import sha256
+from datetime import datetime, timezone
+from time import monotonic
+from uuid import uuid4
+import re
 import json
 import os
 from pathlib import Path, PureWindowsPath
@@ -10,8 +15,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from prisma import (LINE_CUES, anchor_scenario, build_project, decode_mapping, draft_scenario, parse_scenario,
+from prisma import (CHAPTER_ID, LINE_CUES, anchor_scenario, build_project, decode_mapping, draft_scenario, parse_scenario,
                     render_script, scenario_document)
+from llm_credentials import LocalLlmCredentials
+from api_providers import ApiProviders, api_request
 
 
 def require_text(data, key):
@@ -39,7 +46,12 @@ def resolve_llm_settings(config, operation):
     settings = override.get('settings', {})
     if not isinstance(settings, dict):
         raise ValueError(f'{operation} LLM Override 设置须为对象。')
-    return {**global_settings, **settings}
+    effective = {**global_settings, **settings}
+    if settings.get('base_url') and 'provider_id' not in settings:
+        effective['provider_id'] = ''
+    elif 'provider_id' in settings and 'base_url' not in settings:
+        effective['base_url'] = ''
+    return effective
 
 
 def draft(data):
@@ -52,6 +64,7 @@ def draft(data):
     config = data.get('config') or {}
     llm = resolve_llm_settings(config, 'scenario')
     if llm.get('mode', 'rules') == 'openai-compatible':
+        llm = dict(llm, _api_key=data.get('_llm_api_key', ''))
         scenario, pending = draft_scenario_llm(data, speakers, llm)
         return {'scenario': scenario, 'pending': pending, 'engine': 'openai-compatible'}
     if llm.get('mode', 'rules') != 'rules':
@@ -60,17 +73,177 @@ def draft(data):
     return {'scenario': scenario, 'pending': pending, 'engine': 'rules'}
 
 
-def llm_status(_data=None):
-    if os.environ.get('PRISMA_LLM_API_KEY', '').strip():
-        source = 'PRISMA_LLM_API_KEY'
-    elif os.environ.get('OPENAI_API_KEY', '').strip():
-        source = 'OPENAI_API_KEY'
+def llm_api_request(data, credentials):
+    """Fetch model metadata or make a small live connection check."""
+    if not isinstance(data, dict):
+        raise ValueError('LLM API 请求须为 JSON 对象。')
+    base_url = data.get('base_url', '')
+    action = data.get('action', '')
+    if action not in ('models', 'test') or not isinstance(base_url, str) or len(base_url) > 512:
+        raise ValueError('请提供有效的 API 地址和操作。')
+    parsed = urllib.parse.urlparse(base_url.strip())
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError('API 地址须为有效的 HTTP 或 HTTPS 地址，且不可包含账号密码。')
+    if parsed.query or parsed.fragment:
+        raise ValueError('API 地址不可包含查询参数或片段。')
+    if parsed.hostname.lower() not in ('localhost', '127.0.0.1', '::1') and parsed.scheme != 'https':
+        raise ValueError('远程 API 必须使用 HTTPS。')
+    model = data.get('model', '')
+    if action == 'test' and (not isinstance(model, str) or not model.strip() or len(model) > 160):
+        raise ValueError('连接测试需要有效的模型名称。')
+    key = credentials.get(base_url)
+    if not key and parsed.hostname.lower() not in ('localhost', '127.0.0.1', '::1'):
+        raise ValueError('请先在 API 设置中保存此服务商的密钥。')
+    endpoint = base_url.strip().rstrip('/')
+    if not endpoint.endswith('/v1') and not endpoint.endswith('/v1beta/openai'):
+        endpoint += '/v1'
+    if action == 'models':
+        url = endpoint + '/models'
+        body = None
     else:
-        source = ''
-    return {'configured': bool(source), 'source': source}
+        url = endpoint + '/chat/completions'
+        body = json.dumps({'model': model.strip(), 'max_tokens': 8,
+                           'messages': [{'role': 'user', 'content': 'Reply with OK.'}]},
+                          separators=(',', ':')).encode('utf-8')
+    headers = {'Accept': 'application/json'}
+    if body is not None:
+        headers['Content-Type'] = 'application/json'
+    if key:
+        headers['Authorization'] = f'Bearer {key}'
+    request = urllib.request.Request(url, data=body, headers=headers, method='GET' if body is None else 'POST')
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            result = json.loads(response.read(2_000_001))
+    except urllib.error.HTTPError as error:
+        detail = error.read(800).decode('utf-8', errors='replace')
+        raise ValueError(f'LLM API 返回 HTTP {error.code}：{detail[:500]}') from error
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise ValueError(f'LLM API 连接失败：{str(error)[:400]}') from error
+    if not isinstance(result, dict):
+        raise ValueError('LLM API 返回了无法识别的 JSON。')
+    if action == 'models':
+        items = result.get('data')
+        if not isinstance(items, list):
+            raise ValueError('模型接口未返回 OpenAI 兼容的 data 列表。')
+        models = []
+        for item in items[:1000]:
+            if not isinstance(item, dict) or not isinstance(item.get('id'), str):
+                continue
+            models.append(item)
+        return {'models': models, 'count': len(models)}
+    choices = result.get('choices')
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ValueError('请求已送达，但响应缺少模型输出。')
+    message = choices[0].get('message')
+    response_text = message.get('content', '') if isinstance(message, dict) else ''
+    return {'connected': True, 'model': model.strip(),
+            'response': str(response_text)[:100]}
 
 
-def draft_scenario_llm(data, speakers, settings):
+SCENARIO_RESPONSE_FORMAT = (
+    'Return the Scenario document itself. Its top-level keys must be "version" (number 1) and '
+    '"chapters" (a non-empty array). Do not use a wrapper, a flat scene list, or an empty chapters array. '
+    'Use chapter and scene IDs as JSON strings: chapter "1", scene "1:1"; next scene "1:2"; next chapter "2". '
+    'Each chapter needs a non-empty title and scenes array. Each scene needs a non-empty lines array. '
+    'Example shape: {"version":1,"chapters":[{"id":"1","title":"Chapter title",'
+    '"scenes":[{"id":"1:1","lines":[{"text":"Original text","speaker":null,'
+    '"source":{"kind":"raw","line":1}}]}]}]}. The text and title in this example are placeholders.'
+)
+
+
+def model_scenario_document(value, event):
+    def chapter_like(item):
+        return isinstance(item, dict) and 'scenes' in item
+
+    def chapter_list(item):
+        return isinstance(item, list) and bool(item) and all(chapter_like(chapter) for chapter in item)
+
+    current = value
+    keys = ('scenario', 'result', 'data', 'output')
+    while isinstance(current, dict) and 'chapters' not in current and not chapter_like(current):
+        wrapped = [current[key] for key in keys if isinstance(current.get(key), (dict, list))]
+        if len(wrapped) != 1:
+            break
+        current = wrapped[0]
+
+    converted = current is not value
+    if chapter_list(current):
+        document = {'version': 1, 'chapters': current}
+        converted = True
+    elif chapter_like(current):
+        chapter = {key: field for key, field in current.items() if key != 'version'}
+        document = {'version': current.get('version', 1), 'chapters': [chapter]}
+        converted = True
+    elif isinstance(current, dict) and chapter_like(current.get('chapter')) and 'chapters' not in current:
+        document = {'version': current.get('version', 1), 'chapters': [current['chapter']]}
+        converted = True
+    elif isinstance(current, dict):
+        document = dict(current)
+        chapters = document.get('chapters')
+        if isinstance(chapters, dict) and chapter_list(list(chapters.values())):
+            document['chapters'] = list(chapters.values())
+            event('已将模型返回的章节对象按原字段顺序转为列表。')
+    else:
+        document = current
+    if converted and isinstance(document, dict) and 'chapters' in document:
+        if current is not value and isinstance(value, dict):
+            if not isinstance(current, dict) or 'version' not in current:
+                document['version'] = value.get('version', 1)
+        event('已整理模型返回的外层结构。')
+    if isinstance(document, dict) and 'chapters' not in document:
+        fields = ', '.join(str(key)[:30] for key in list(document)[:8]) or '无'
+        raise ValueError(f'缺少顶层 chapters。实际字段：{fields}。可展开日志中的模型响应。')
+    if isinstance(document, dict) and ('version' not in document or document['version'] == '1'):
+        document['version'] = 1
+        event('已将模型输出的版本字段规范为数字 1。')
+    return document
+
+
+def normalize_model_scenario(document, event):
+    """Repair generated container IDs before the standard Scenario validator."""
+    if not isinstance(document, dict):
+        raise ValueError('返回的 Scenario 须为 JSON 对象。')
+    chapters = document.get('chapters')
+    if not isinstance(chapters, list) or not chapters:
+        shape = '空数组' if chapters == [] else '空值' if chapters is None else type(chapters).__name__
+        raise ValueError(f'chapters 须为非空数组，模型返回了{shape}。')
+    normalize_ids = False
+    seen_chapters, seen_scenes = set(), set()
+    for position, chapter in enumerate(chapters, 1):
+        path = f'第 {position} 章'
+        if not isinstance(chapter, dict):
+            raise ValueError(f'{path}须为对象。')
+        title = chapter.get('title')
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(f'{path}缺少非空的 title。')
+        scenes = chapter.get('scenes')
+        if not isinstance(scenes, list) or not scenes:
+            raise ValueError(f'{path}缺少非空的 scenes 数组。')
+        ident = chapter.get('id')
+        valid = isinstance(ident, str) and CHAPTER_ID.fullmatch(ident) and ident not in seen_chapters
+        if valid:
+            seen_chapters.add(ident)
+        else:
+            normalize_ids = True
+        for index, scene in enumerate(scenes, 1):
+            if not isinstance(scene, dict) or not isinstance(scene.get('lines'), list) or not scene['lines']:
+                raise ValueError(f'{path}第 {index} 场须为带有非空 lines 数组的对象。')
+            scene_id = scene.get('id')
+            if (valid and isinstance(scene_id, str) and re.fullmatch(rf'{ident}:[1-9][0-9]*', scene_id)
+                    and scene_id not in seen_scenes):
+                seen_scenes.add(scene_id)
+            else:
+                normalize_ids = True
+    if normalize_ids:
+        for position, chapter in enumerate(chapters, 1):
+            chapter['id'] = str(position)
+            for index, scene in enumerate(chapter['scenes'], 1):
+                scene['id'] = f'{position}:{index}'
+        event('模型返回的章节或场景编号不符合格式，已按原顺序重新编号。')
+    return document
+
+
+def draft_scenario_llm(data, speakers, settings, event=lambda _message: None, save_failed_response=None):
     raw = require_text(data, 'raw')
     heading = require_text(data, 'heading').strip()
     base_url = settings.get('base_url', 'https://api.openai.com/v1')
@@ -89,43 +262,58 @@ def draft_scenario_llm(data, speakers, settings):
         raise ValueError('LLM Temperature 或最大输出 Token 超出范围。')
     if type(timeout) is not int or not 30 <= timeout <= 600 or not isinstance(system, str) or not system.strip():
         raise ValueError('LLM 请求超时或系统提示词无效。')
+    system = f'{system.rstrip()}\n\n{SCENARIO_RESPONSE_FORMAT}'
     parsed = urllib.parse.urlparse(base_url)
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         raise ValueError('LLM API 地址须以 http:// 或 https:// 开头。')
-    endpoint = base_url.rstrip('/')
-    if not endpoint.endswith('/chat/completions'):
-        endpoint += '/chat/completions'
-    key = os.environ.get('PRISMA_LLM_API_KEY', '').strip() or os.environ.get('OPENAI_API_KEY', '').strip()
-    if not key and parsed.hostname not in ('localhost', '127.0.0.1', '::1'):
-        raise ValueError('请在启动 WebUI 前设置 PRISMA_LLM_API_KEY 或 OPENAI_API_KEY。')
+    key = settings.get('_api_key', '')
     user = json.dumps({'heading': heading, 'speaker_map_by_raw_line': speakers, 'raw_text': raw}, ensure_ascii=False)
-    body = json.dumps({'model': model.strip(), 'temperature': temperature, 'max_tokens': max_tokens,
-                       'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]},
-                      ensure_ascii=False).encode('utf-8')
-    headers = {'Content-Type': 'application/json'}
-    if key:
-        headers['Authorization'] = f'Bearer {key}'
-    request = urllib.request.Request(endpoint, data=body, headers=headers, method='POST')
+    protocol = settings.get('_protocol', 'openai')
+    payload = {'model': model.strip(), 'max_tokens': max_tokens, 'temperature': temperature,
+               'messages': [{'role': 'user', 'content': user}]}
+    if protocol == 'anthropic':
+        if temperature > 1:
+            raise ValueError('Anthropic Temperature 须为 0–1。')
+        payload['system'] = system
+    else:
+        payload['messages'].insert(0, {'role': 'system', 'content': system})
+        if parsed.hostname == 'api.openai.com' and model.strip().startswith(('gpt-5', 'gpt-6', 'o1', 'o3', 'o4')):
+            payload['max_completion_tokens'] = payload.pop('max_tokens')
+            payload.pop('temperature')
+    operation = 'messages' if protocol == 'anthropic' else 'chat/completions'
+    event(f'已开始请求 POST /{operation}，等待响应（超时 {timeout} 秒）。')
+    status, result = api_request({'base_url': base_url, 'api_key': key, 'protocol': protocol},
+                                 operation, payload, timeout=timeout, limit=8_000_000, response_meta=True)
+    event(f'收到 HTTP {status}，正在解析 Scenario JSON。')
+    content = None
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            result = json.loads(response.read())
-    except urllib.error.HTTPError as error:
-        detail = error.read(1200).decode('utf-8', errors='replace')
-        raise ValueError(f'LLM 请求失败（HTTP {error.code}）：{detail[:600]}') from None
-    except (urllib.error.URLError, TimeoutError) as error:
-        raise ValueError(f'无法连接 LLM 服务：{error}') from None
-    except (json.JSONDecodeError, UnicodeError) as error:
-        raise ValueError(f'LLM 服务返回了无效响应：{error}') from None
-    try:
-        content = result['choices'][0]['message']['content']
-        if not isinstance(content, str):
-            raise TypeError('message content is not text')
-        text = content.strip()
+        if not isinstance(result, dict):
+            raise ValueError('模型接口响应须为 JSON 对象。')
+        if protocol == 'anthropic':
+            content = ''.join(block['text'] for block in result['content']
+                              if isinstance(block, dict) and block.get('type') == 'text'
+                              and isinstance(block.get('text'), str))
+            if result.get('stop_reason') == 'max_tokens':
+                raise ValueError('已达到 Token 上限。请提高最大输出 Token，或缩短本次原文。')
+        else:
+            choice = result['choices'][0]
+            if not isinstance(choice, dict):
+                raise ValueError('模型接口响应缺少有效的 choices。')
+            if isinstance(choice.get('message'), dict):
+                content = choice['message'].get('content')
+            if choice.get('finish_reason') == 'length':
+                raise ValueError('已达到 Token 上限。请提高最大输出 Token，或缩短本次原文。')
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError('模型没有返回可解析的正文。')
+        text = content.strip().lstrip('\ufeff')
         if text.startswith('```'):
             text = text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
-        document = json.loads(text)
+        parsed_document = model_scenario_document(json.loads(text), event)
+        document = normalize_model_scenario(parsed_document, event)
         scenes = parse_scenario(document, allow_unresolved=True)
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as error:
+        if save_failed_response and isinstance(content, str) and content.strip():
+            save_failed_response(content)
         raise ValueError(f'LLM 输出不符合 Scenario v1 结构：{error}') from None
     scenario = scenario_document(scenes)
     pending = [line.source for scene in scenes for line in scene.lines
@@ -193,20 +381,157 @@ class StudioWorkflow:
 
     def __init__(self, resources):
         self.resources = resources
+        self.credentials = LocalLlmCredentials(resources.library)
+        self.providers = ApiProviders(resources.library)
 
     def draft(self, data):
+        return self._record_run('scenario', data, self._draft)
+
+    def speech(self, data):
+        return self._record_run('voice-assets', data, self._speech)
+
+    def generation_log(self, data):
+        project, node = data.get('project_id') or '', data.get('node')
+        ident = data.get('run_id')
+        if node not in ('scenario', 'voice-assets'):
+            raise ValueError('此节点没有请求日志。')
+        include_response = data.get('include_response') is True
+        with self.resources.library.connection() as db:
+            row = db.execute("""SELECT id,state,events,response_text IS NOT NULL AS has_response,
+                CASE WHEN ? AND state='failed' THEN response_text END AS response_text FROM generation_runs
+                WHERE project=? AND node=? AND (? IS NULL OR id=?) ORDER BY rowid DESC LIMIT 1""",
+                             (include_response, project, node, ident, ident)).fetchone()
+        if not row:
+            return {'run': None}
+        payload = dict(row, events=json.loads(row['events']), has_response=bool(row['has_response']) and row['state']=='failed')
+        if not include_response:
+            payload.pop('response_text')
+        return {'run': payload}
+
+    def _record_run(self, node, data, operation):
+        project = data.get('project_id') or ''
+        if project:
+            self.resources.project_record(project)
+        ident = data.get('run_id') or uuid4().hex
+        if not isinstance(ident, str) or not re.fullmatch('[a-f0-9]{32}', ident):
+            raise ValueError('生成日志 ID 无效。')
+        events, started = [], monotonic()
+        library = self.resources.library
+        with library.connection() as db:
+            cursor = db.execute("""INSERT OR IGNORE INTO generation_runs (id,project,node,state,events)
+                VALUES (?,?,?,'running','[]')""",
+                                (ident, project, node))
+            if not cursor.rowcount:
+                raise ValueError('此运行已提交，请查看日志。')
+
+        def event(message, state='running'):
+            events.append({'at': datetime.now(timezone.utc).isoformat(), 'elapsed': round(monotonic() - started, 2),
+                           'message': message})
+            with library.connection() as db:
+                db.execute('UPDATE generation_runs SET state=?,events=? WHERE id=?',
+                           (state, json.dumps(events, ensure_ascii=False), ident))
+
+        def save_failed_response(content):
+            preview = content[:16000].encode('utf-8', errors='replace').decode('utf-8')
+            if len(content) > 16000:
+                preview += '\n\n[仅保存前 16,000 个字符]'
+            with library.connection() as db:
+                db.execute('UPDATE generation_runs SET response_text=? WHERE id=?', (preview, ident))
+
+        event('服务端已接收请求。')
+        try:
+            result = operation(data, event, save_failed_response)
+        except (ValueError, OSError) as error:
+            event(f'失败：{str(error)[:450]}', 'failed')
+            raise
+        except Exception:
+            event('失败：服务端内部错误。', 'failed')
+            raise
+        event('已完成，产物已登记。', 'done')
+        return dict(result, run_id=ident)
+
+    def _draft(self, data, event, save_failed_response):
         data = dict(data)
         project = data.get('project_id')
         if 'config' not in data and project:
             data['config'] = self.resources.load_project({'id': project})['config']
-        result = draft(data)
+        settings = resolve_llm_settings(data.get('config') or {}, 'scenario')
+        mode = data.get('mode', settings.get('mode', 'rules'))
+        if mode not in ('rules', 'openai-compatible'):
+            raise ValueError('请选择本地解析或 Provider。')
+        parameters = data.get('parameters', {})
+        if not isinstance(parameters, dict) or parameters.keys() - {'temperature', 'max_tokens', 'timeout', 'system_prompt'}:
+            raise ValueError('Scenario 试跑参数格式无效。')
+        settings.update(parameters)
+        model_ref = None
+        speakers = data.get('speakers', {})
+        if mode == 'openai-compatible':
+            if not isinstance(speakers, dict) or type(data.get('line_ids', False)) is not bool:
+                raise ValueError('说话人映射或台词 ID 选项无效。')
+            provider, declared = self.providers.resolve_node_model('text', data.get('model_override'))
+            model = declared['id']
+            settings.update(base_url=provider['base_url'], model=model, _api_key=provider['api_key'],
+                            _protocol=provider['protocol'])
+            event(f'使用 {provider["name"]} · {model}。')
+            scenario, pending = draft_scenario_llm(data, speakers, settings, event, save_failed_response)
+            result = {'scenario': scenario, 'pending': pending, 'engine': provider['protocol'] + '-compatible'}
+            model_ref = {'provider_id': provider['id'], 'model': model, 'protocol': provider['protocol']}
+        else:
+            event('正在运行本地规则解析。')
+            result = draft(dict(data, config={}))
+        event(f'Scenario 已解析，{len(result["pending"])} 条对白待确认，正在登记。')
         source_id = self.resources.document('source', require_text(data, 'raw'), project=project)
         links = [('from_source', 'source', source_id)]
-        scenario_id = self.resources.document('scenario', result['scenario'], links, project=project)
-        return dict(result, source_id=source_id, scenario_id=scenario_id)
+        generation = None
+        if model_ref:
+            generation = {**model_ref, **{key: settings[key] for key in
+                          ('system_prompt', 'temperature', 'max_tokens', 'timeout') if key in settings}}
+        scenario_id = self.resources.document('scenario', result['scenario'], links, project=project, generation=generation)
+        return dict(result, source_id=source_id, scenario_id=scenario_id, **({'model_ref': model_ref} if model_ref else {}))
+
+    def _speech(self, data, event, _save_failed_response):
+        project = data.get('project_id')
+        self.resources.project_record(project)
+        text = require_text(data, 'text').strip()
+        voice = require_text(data, 'voice').strip()
+        line_id = require_text(data, 'line_id').strip()
+        speed = data.get('speed', 1)
+        if not 1 <= len(text) <= 4096 or not 1 <= len(voice) <= 100 or len(line_id) > 160:
+            raise ValueError('请填写日语台词和声音名称。台词最多 4096 字。')
+        if type(speed) not in (int, float) or not 0.25 <= speed <= 4:
+            raise ValueError('语速须为 0.25–4。')
+        provider, model = self.providers.resolve_node_model('audio', data.get('model_override'))
+        event(f'使用 {provider["name"]} · {model["id"]}，开始请求 POST /audio/speech（超时 120 秒）。')
+        status, blob = api_request(provider, 'audio/speech', {
+            'model': model['id'], 'input': text, 'voice': voice, 'speed': speed, 'response_format': 'mp3',
+        }, binary=True, limit=16_000_000, timeout=120, response_meta=True)
+        event(f'收到 HTTP {status} · {len(blob):,} 字节，正在检查音频。')
+        if not (blob.startswith(b'ID3') or len(blob) > 2 and blob[0] == 255 and blob[1] & 224 == 224):
+            raise ValueError('音频 API 未返回 MP3。')
+        params = {'provider_id': provider['id'], 'model': model['id'], 'voice': voice,
+                  'speed': speed, 'language': 'ja', 'line_id': line_id, 'text': text}
+        fingerprint = sha256(json.dumps(params, ensure_ascii=False).encode()).hexdigest()[:12]
+        return self.resources.register_asset(f'voice-{fingerprint}.mp3', blob=blob, project=project, generation=params)
 
     def llm_status(self, data=None):
-        return llm_status(data)
+        data = data or {}
+        return self.credentials.status(require_text(data, 'base_url'))
+
+    def llm_api(self, data):
+        return llm_api_request(data, self.credentials)
+
+    def llm_credential(self, data):
+        if not isinstance(data, dict):
+            raise ValueError('API 凭据请求须为 JSON 对象。')
+        base_url = require_text(data, 'base_url')
+        action = require_text(data, 'action')
+        if action == 'status':
+            return self.credentials.status(base_url)
+        if action == 'save':
+            return self.credentials.save(base_url, require_text(data, 'api_key'))
+        if action == 'clear':
+            return self.credentials.clear(base_url)
+        raise ValueError('未知的 API 凭据操作。')
 
     def anchor(self, data):
         result = anchor(data)

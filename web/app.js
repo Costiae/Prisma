@@ -11,23 +11,24 @@ const lineCues = 'by_line_id';
 const uploads = new Map();
 const managedAssets = new WeakMap();
 const scenarioData = () => scenario.value ? JSON.parse(scenario.value) : undefined;
-const llmSettingSuffixes = {mode: 'mode', base_url: 'url', model: 'model', temperature: 'temperature',
+const llmSettingSuffixes = {mode: 'mode', temperature: 'temperature',
   max_tokens: 'tokens', timeout: 'timeout', system_prompt: 'system'};
 const projectConfigIds = [
-  'project-width', 'project-height', 'config-llm-mode', 'config-llm-url', 'config-llm-model',
+  'project-width', 'project-height', 'config-llm-mode',
   'config-llm-temperature', 'config-llm-tokens', 'config-llm-timeout', 'config-llm-system',
-  'config-llm-scenario-enabled', 'config-llm-scenario-mode', 'config-llm-scenario-url', 'config-llm-scenario-model',
+  'config-llm-scenario-enabled', 'config-llm-scenario-mode',
   'config-llm-scenario-temperature', 'config-llm-scenario-tokens', 'config-llm-scenario-timeout',
   'config-llm-scenario-system', 'config-image-mode', 'config-image-base',
   'config-image-lora', 'config-image-compare', 'config-image-weight', 'config-image-size',
   'config-image-sampler', 'config-image-steps', 'config-image-cfg', 'config-image-seed',
-  'config-image-count', 'config-image-online-model', 'config-image-online-size', 'config-image-quality',
+  'config-image-count', 'config-image-online-size', 'config-image-quality',
   'config-image-negative', 'config-train-base', 'config-train-dataset', 'config-train-parent',
   'config-train-name', 'config-train-steps', 'config-train-save', 'config-train-rank',
   'config-train-lr', 'config-train-repeats', 'config-train-seed', 'config-prompt-style', 'config-prompt-negative',
 ];
 let openProject = null;
 let projectScopeId;
+let pendingProjectView = '';
 let projectWriteTimer;
 let projectWriteInFlight = false;
 let projectWritePromise;
@@ -41,7 +42,7 @@ function updateProjectScope() {
   current.textContent = openProject ? field('project-name').value || '未命名项目' : '未打开项目';
   current.title = current.textContent;
   field('project-scope').hidden = !openProject;
-  field('project-nav').hidden = !openProject;
+  if (!openProject) setProjectNavOpen(false);
   updateWorkspaceTitle(document.querySelector('[data-workspace-view]:not([hidden])'));
   updateWorkspaceStatus();
   field('project-close').disabled = !openProject;
@@ -132,7 +133,7 @@ function projectConfig() {
   const number = (id) => field(id).valueAsNumber;
   const seed = (id) => value(id) === '' ? null : number(id);
   const readLlmSettings = (prefix) => ({
-    mode: value(`${prefix}mode`), base_url: value(`${prefix}url`).trim(), model: value(`${prefix}model`).trim(),
+    mode: value(`${prefix}mode`),
     temperature: number(`${prefix}temperature`), max_tokens: number(`${prefix}tokens`),
     timeout: number(`${prefix}timeout`), system_prompt: value(`${prefix}system`),
   });
@@ -147,7 +148,7 @@ function projectConfig() {
       lora: value('config-image-lora'), compare: value('config-image-compare'), weight: number('config-image-weight'),
       size: value('config-image-size'), seed: seed('config-image-seed'), sampler: value('config-image-sampler'),
       steps: number('config-image-steps'), cfg: number('config-image-cfg'), count: number('config-image-count'),
-      negative: value('config-image-negative'), online_model: value('config-image-online-model'),
+      negative: value('config-image-negative'),
       online_size: value('config-image-online-size'), quality: value('config-image-quality')},
     training: {base_model: value('config-train-base'), dataset: value('config-train-dataset'),
       parent: value('config-train-parent'), name: value('config-train-name'), steps: number('config-train-steps'),
@@ -179,16 +180,8 @@ function projectConfig() {
 }
 
 function validateLlmConfig(llm, label, numericValid) {
-  if (!['rules', 'openai-compatible'].includes(llm.mode)
-      || (llm.mode === 'openai-compatible' && (!llm.base_url || !llm.model))) {
-    throw new Error(`${label}模式、API 地址和模型名称需要配置完整。`);
-  }
-  if (llm.mode === 'openai-compatible') {
-    let endpoint;
-    try { endpoint = new URL(llm.base_url); } catch { endpoint = null; }
-    if (!endpoint || !['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) {
-      throw new Error(`${label} API 地址须为不含账号密码的 HTTP(S) 地址。`);
-    }
+  if (!['rules', 'openai-compatible'].includes(llm.mode)) {
+    throw new Error(`${label}请选择执行方式。`);
   }
   if (!numericValid(llm.temperature, 0, 2) || !numericValid(llm.max_tokens, 128, 32768, true)
       || !numericValid(llm.timeout, 30, 600, true) || !llm.system_prompt.trim() || llm.system_prompt.length > 6000) {
@@ -197,8 +190,12 @@ function validateLlmConfig(llm, label, numericValid) {
 }
 
 function copyGlobalLlmToScenarioOverride() {
-  for (const [key, suffix] of Object.entries(llmSettingSuffixes)) {
-    field(`config-llm-scenario-${suffix}`).value = field(`config-llm-${suffix}`).value;
+  for (const suffix of Object.values(llmSettingSuffixes)) {
+    const source = field(`config-llm-${suffix}`), target = field(`config-llm-scenario-${suffix}`);
+    if (target instanceof HTMLSelectElement && !Array.from(target.options).some((option) => option.value === source.value)) {
+      target.add(new Option(source.selectedOptions[0]?.textContent || source.value, source.value));
+    }
+    target.value = source.value;
   }
 }
 
@@ -212,11 +209,11 @@ function updateScenarioLlmOverrideUi() {
 function applyProjectConfig(config = {}) {
   const defaults = {
     resolution: {width: 1280, height: 720},
-    llm: {mode: 'rules', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', temperature: 0.2,
+    llm: {mode: 'rules', provider_id: '', base_url: '', model: '', temperature: 0.2,
       max_tokens: 4096, timeout: 180, system_prompt: field('config-llm-system').defaultValue},
     generation: {mode: 'local', base_model: '', lora: '', compare: 'none', weight: 0.35, size: '512x896',
       seed: null, sampler: 'euler_a', steps: 20, cfg: 6.5, count: 1,
-      negative: field('config-image-negative').defaultValue, online_model: '', online_size: '1024x1536', quality: 'medium'},
+      negative: field('config-image-negative').defaultValue, provider_id: '', online_model: '', online_size: '1024x1536', quality: 'medium'},
     training: {base_model: '', dataset: '', parent: '', name: 'prisma_style_next', steps: 200,
       save_every: 100, rank: 4, lr: 0.0001, repeats: 10, seed: 1065270805},
     prompts: {style: field('config-prompt-style').defaultValue, negative: field('config-prompt-negative').defaultValue},
@@ -235,11 +232,10 @@ function applyProjectConfig(config = {}) {
   set('project-height', merged.resolution.height);
   const groups = {llm: 'config-llm-', generation: 'config-image-', training: 'config-train-', prompts: 'config-prompt-'};
   for (const [group, prefix] of Object.entries(groups)) {
-    const keys = group === 'llm' ? {mode: 'mode', base_url: 'url', model: 'model', temperature: 'temperature',
-      max_tokens: 'tokens', timeout: 'timeout', system_prompt: 'system'}
+    const keys = group === 'llm' ? llmSettingSuffixes
       : group === 'generation' ? {mode: 'mode', base_model: 'base', lora: 'lora', compare: 'compare', weight: 'weight',
         size: 'size', seed: 'seed', sampler: 'sampler', steps: 'steps', cfg: 'cfg', count: 'count', negative: 'negative',
-        online_model: 'online-model', online_size: 'online-size', quality: 'quality'}
+        online_size: 'online-size', quality: 'quality'}
       : group === 'training' ? {base_model: 'base', dataset: 'dataset', parent: 'parent', name: 'name', steps: 'steps',
         save_every: 'save', rank: 'rank', lr: 'lr', repeats: 'repeats', seed: 'seed'}
       : {style: 'style', negative: 'negative'};
@@ -444,45 +440,87 @@ async function flushProjectWrite() {
   }
 }
 
+function workspaceRoute(id) {
+  if (id === 'script-ide') return 'script-ide-workspace';
+  return ['script-workbench', 'production'].includes(id) ? 'stage-script' : id;
+}
+
+function projectAddress(id) {
+  const address = new URL(location.href);
+  if (id) address.searchParams.set('project', id);
+  else address.searchParams.delete('project');
+  if (address.href !== location.href) history.replaceState(null, '', address);
+}
+
+function revealActiveRouteNode() {
+  const nodes = field('route-nav-children');
+  const current = nodes.querySelector('[aria-current="page"]');
+  if (!current || !nodes.clientHeight) return;
+  const item = current.getBoundingClientRect();
+  const list = nodes.getBoundingClientRect();
+  if (item.top < list.top) nodes.scrollTop += item.top - list.top;
+  else if (item.bottom > list.bottom) nodes.scrollTop += item.bottom - list.bottom;
+}
+
+function setProjectNavOpen(open) {
+  field('project-nav').toggleAttribute('data-expanded', open);
+  field('project-nav-toggle').setAttribute('aria-expanded', String(open));
+  if (open) revealActiveRouteNode();
+}
+
+function setRouteNavOpen(open) {
+  const toggle = field('route-nav-toggle');
+  field('route-nav-children').hidden = !open;
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.setAttribute('aria-label', open ? '折叠路线图节点' : '展开路线图节点');
+}
+
 function workspaceView() {
   const hash = location.hash.slice(1);
   let id;
   try { id = decodeURIComponent(hash); }
   catch { id = ''; }
+  const original = id;
+  id = workspaceRoute(id);
+  if (openProject) projectAddress(openProject.id);
+  if (openProject && id !== original) history.replaceState(null, '', `#${id}`);
   const stage = /^stage-([a-z][a-z0-9-]*)$/.exec(id);
   document.dispatchEvent(new CustomEvent('prisma-before-view-change', {detail: stage?.[1] || null}));
   let target = field(stage ? 'pipeline-stage' : id || 'projects');
   let view = target?.closest('[data-workspace-view]') || field('projects');
-  // Every production surface is part of an opened project. The project library
-  // is the only workspace available without a project context.
-  if (view.id !== 'project-manager' && !openProject) {
+  // Production surfaces need an opened project; the project library and
+  // workspace-level API provider manager are global.
+  if (!['project-manager', 'api-providers'].includes(view.id) && !openProject) {
+    if (stage || ['projects', 'script-ide-workspace', 'approved-assets', 'project-config'].includes(id)) pendingProjectView = id;
     view = field('project-manager');
     target = view;
     if (location.hash !== '#project-manager') history.replaceState(null, '', '#project-manager');
   }
   document.querySelectorAll('[data-workspace-view]').forEach((panel) => { panel.hidden = panel !== view; });
-  const activeTab = view.id === 'pipeline-stage' ? id : view.id;
+  field('workspace-content').classList.toggle('workspace-content-ide', view.id === 'script-ide-workspace');
+  const awaitingProject = !openProject && Boolean(pendingProjectView);
+  let activeTab = view.id === 'pipeline-stage' ? id : view.id;
+  if (awaitingProject) activeTab = pendingProjectView;
+  const insideRoute = activeTab.startsWith('stage-');
+  field('route-nav').toggleAttribute('data-active', insideRoute);
+  if (insideRoute) setRouteNavOpen(true);
+  const hint = field('project-navigation-hint');
+  hint.hidden = !awaitingProject;
+  if (awaitingProject) hint.textContent = '打开一个项目即可进入所选节点。';
+  setProjectNavOpen(false);
   document.querySelectorAll('.workspace-nav a').forEach((link) => {
-    if (link.hash === `#${activeTab}`) link.setAttribute('aria-current', 'page');
-    else link.removeAttribute('aria-current');
+    if (link.hash === `#${activeTab}`) {
+      link.setAttribute('aria-current', 'page');
+      if (awaitingProject) hint.textContent = `打开一个项目即可进入「${link.textContent.trim()}」。`;
+    } else link.removeAttribute('aria-current');
   });
-  const sidebar = document.querySelector('.workspace-sidebar');
-  if (sidebar.scrollWidth > sidebar.clientWidth) {
-    const activeLink = sidebar.querySelector('[aria-current="page"]');
-    if (activeLink) {
-      const viewport = sidebar.getBoundingClientRect();
-      const item = activeLink.getBoundingClientRect();
-      if (item.left < viewport.left || item.right > viewport.right) {
-        sidebar.scrollLeft += item.left - viewport.left - 8;
-      }
-    }
-  }
+  if (insideRoute) revealActiveRouteNode();
   document.querySelectorAll('.config-nav a').forEach((link) => {
     if (link.hash === `#${target?.id}`) link.setAttribute('aria-current', 'location');
     else link.removeAttribute('aria-current');
   });
   updateWorkspaceTitle(view);
-  field('workspace-map-link').hidden = ['projects', 'project-manager', 'pipeline-stage'].includes(view.id);
+  field('workspace-map-link').hidden = ['projects', 'project-manager', 'pipeline-stage', 'api-providers'].includes(view.id);
   if (stage && openProject) document.dispatchEvent(new CustomEvent('prisma-stage-change', {detail: stage[1]}));
   if (target && target !== view && target.id !== 'pipeline') {
     const disclosure = target.closest('details');
@@ -493,6 +531,7 @@ function workspaceView() {
 }
 
 function goWorkspace(id) {
+  id = workspaceRoute(id);
   const target = field(id);
   if (target && !field('pipeline-stage').hidden && field('stage-tools').contains(target)) {
     const disclosure = target.closest('details');
@@ -505,6 +544,24 @@ function goWorkspace(id) {
 }
 
 window.addEventListener('hashchange', workspaceView);
+field('nav-project-library').addEventListener('click', () => {
+  pendingProjectView = '';
+  if (location.hash === '#project-manager') workspaceView();
+});
+field('project-nav-toggle').addEventListener('click', (event) => {
+  setProjectNavOpen(event.currentTarget.getAttribute('aria-expanded') !== 'true');
+});
+field('route-nav-toggle').addEventListener('click', (event) => {
+  const open = event.currentTarget.getAttribute('aria-expanded') !== 'true';
+  setRouteNavOpen(open);
+  if (open) revealActiveRouteNode();
+});
+field('project-nav').addEventListener('keydown', (event) => {
+  const toggle = field('project-nav-toggle');
+  if (event.key !== 'Escape' || toggle.getAttribute('aria-expanded') !== 'true') return;
+  setProjectNavOpen(false);
+  toggle.focus();
+});
 document.addEventListener('prisma-view-change', (event) => {
   if (event.detail === 'project-config') refreshProjectLlmStatus();
 });
@@ -546,22 +603,6 @@ function reportNodeOutput(node, result) {
   document.dispatchEvent(new CustomEvent('prisma-node-output', {detail: {node, result}}));
 }
 
-async function refreshProjectLlmStatus() {
-  const output = field('config-llm-key-state');
-  try {
-    const response = await request('/api/llm/status', {});
-    const state = await response.json();
-    output.textContent = state.configured
-      ? `服务端已配置 ${state.source}。密钥不会写入项目。`
-      : '服务端未检测到 PRISMA_LLM_API_KEY 或 OPENAI_API_KEY。'
-        + '可在本机兼容服务上留空密钥；远程 API 需要在启动环境设置密钥。';
-    output.classList.toggle('is-ready', state.configured);
-    output.classList.toggle('is-missing', !state.configured);
-  } catch (error) {
-    output.textContent = `无法读取 LLM 服务状态：${error.message}`;
-    output.classList.add('is-missing');
-  }
-}
 
 async function run(button, pending, task) {
   button.disabled = true;
@@ -577,6 +618,111 @@ async function run(button, pending, task) {
     updateWorkspaceStatus();
   }
 }
+
+const requestLogNodes = {'scenario': 'scenario-request-log', 'voice-assets': 'voice-request-log'};
+const requestLogWatchers = new Map();
+
+function showRequestLog(node, run, fallback = '') {
+  const panel = field(requestLogNodes[node]);
+  const status = {running: '运行中', done: '已完成', failed: '失败', interrupted: '服务重启，运行已中断'};
+  const summary = panel.querySelector('[role=status]');
+  const title = run ? status[run.state] : fallback || '暂无运行记录';
+  if (summary.textContent !== title) summary.textContent = title;
+  summary.classList.toggle('error-text', ['failed', 'interrupted'].includes(run?.state));
+  if (node === 'scenario') {
+    const details = field('scenario-response-preview');
+    const id = run?.has_response ? run.id : '';
+    if (details.dataset.run !== id) {
+      details.dataset.run = id;
+      details.open = false;
+      details.querySelector('pre').textContent = '';
+    }
+    details.hidden = !id;
+  }
+  const output = panel.querySelector('ol');
+  const events = run?.events || [];
+  const signature = JSON.stringify(events);
+  if (output.dataset.signature === signature) return;
+  output.dataset.signature = signature;
+  output.replaceChildren(...events.map((event) => {
+    const row = document.createElement('li');
+    const time = document.createElement('time');
+    time.dateTime = event.at;
+    time.textContent = new Date(event.at).toLocaleTimeString('zh-CN', {hour12: false});
+    row.append(time, document.createTextNode(` +${event.elapsed.toFixed(2)} s · ${event.message}`));
+    return row;
+  }));
+}
+
+field('scenario-response-preview').ontoggle = async (event) => {
+  const details = event.currentTarget;
+  const runId = details.dataset.run;
+  const project = openProject?.id;
+  const output = details.querySelector('pre');
+  if (!details.open || !runId || output.textContent) return;
+  output.textContent = '正在读取…';
+  try {
+    const {run} = await (await request('/api/generation/log', {
+      project_id: project, node: 'scenario', run_id: runId, include_response: true,
+    })).json();
+    if (details.dataset.run === runId && openProject?.id === project) {
+      output.textContent = run?.response_text || '没有可显示的响应正文。';
+    }
+  } catch (error) {
+    if (details.dataset.run === runId && openProject?.id === project) output.textContent = error.message;
+  }
+};
+
+function watchRequestLog(node, project, runId) {
+  const watcher = {};
+  requestLogWatchers.set(node, watcher);
+  const current = () => requestLogWatchers.get(node) === watcher && project === openProject?.id;
+  if (runId) showRequestLog(node, null, '正在提交请求…');
+  const read = async () => {
+    if (!current()) return;
+    try {
+      const query = {project_id: project, node, ...(runId ? {run_id: runId} : {})};
+      const {run} = await (await request('/api/generation/log', query)).json();
+      if (!current()) return;
+      if (run || !runId) showRequestLog(node, run);
+      if (run?.state === 'running' || (runId && !run && !watcher.finished)) setTimeout(read, 1100);
+    } catch (error) {
+      if (current() && !watcher.finished) setTimeout(read, 2500);
+    }
+  };
+  read();
+  return async (error) => {
+    watcher.finished = true;
+    if (!current()) return;
+    try {
+      const {run} = await (await request('/api/generation/log', {project_id: project, node, run_id: runId})).json();
+      if (current()) showRequestLog(node, run, error?.message || '请求已结束。');
+    } catch (failure) {
+      if (current()) showRequestLog(node, null, error?.message || failure.message);
+    }
+  };
+}
+
+async function generationRequest(node, url, data) {
+  const run_id = crypto.randomUUID().replaceAll('-', '');
+  const finish = watchRequestLog(node, data.project_id, run_id);
+  try {
+    const result = await (await request(url, {...data, run_id})).json();
+    await finish();
+    return result;
+  } catch (error) {
+    await finish(error);
+    throw error;
+  }
+}
+
+document.addEventListener('prisma-project-change', () => {
+  requestLogWatchers.clear();
+  for (const node of Object.keys(requestLogNodes)) showRequestLog(node, null);
+});
+document.addEventListener('prisma-node-tools', ({detail}) => {
+  if (requestLogNodes[detail] && openProject && !requestLogWatchers.has(detail)) watchRequestLog(detail, openProject.id);
+});
 
 function download(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -782,6 +928,30 @@ field('sample').addEventListener('click', () => {
   message('已载入车站样例。通过后可在 Scenario 节点生成剧本。');
 });
 
+let scenarioTrialProject;
+function updateScenarioRunMode() {
+  const local = field('scenario-run-mode').value === 'rules';
+  const controls = field('scenario-run-parameters');
+  controls.hidden = controls.disabled = local;
+}
+
+function initScenarioTrial() {
+  if (scenarioTrialProject === openProject?.id) return;
+  const config = projectConfig();
+  const override = config.llm_overrides.scenario;
+  const settings = override.enabled ? {...config.llm, ...override.settings} : config.llm;
+  for (const [key, suffix] of Object.entries(llmSettingSuffixes)) field(`scenario-run-${suffix}`).value = settings[key];
+  scenarioTrialProject = openProject?.id;
+  updateScenarioRunMode();
+}
+document.addEventListener('prisma-project-change', () => { scenarioTrialProject = undefined; });
+document.addEventListener('prisma-node-tools', ({detail}) => {
+  if (detail === 'scenario') {
+    try { initScenarioTrial(); } catch (error) { message(error.message, true); }
+  }
+});
+field('scenario-run-mode').onchange = updateScenarioRunMode;
+
 field('draft').addEventListener('click', (event) => {
   if (scenario.value.trim() && !event.currentTarget.dataset.stageRetry && !confirm('用新草稿替换当前 Scenario？')) return;
   exported = false;
@@ -790,18 +960,28 @@ field('draft').addEventListener('click', (event) => {
     const project = openProject?.id;
     const input = await approvedNodeInput('source');
     if (project !== openProject?.id) return;
-    const response = await request('/api/draft', {
+    initScenarioTrial();
+    const mode = field('scenario-run-mode').value;
+    const parameters = mode === 'openai-compatible' ? {
+      temperature: field('scenario-run-temperature').valueAsNumber,
+      max_tokens: field('scenario-run-tokens').valueAsNumber,
+      timeout: field('scenario-run-timeout').valueAsNumber,
+      system_prompt: field('scenario-run-system').value,
+    } : {};
+    const result = await generationRequest('scenario', '/api/draft', {
       ...projectScope(),
-      config: projectConfig(),
+      mode, parameters,
+      model_override: mode === 'openai-compatible' ? readProviderRef(field('scenario-run-model').value) : null,
       raw: input?.text ?? raw.value,
       heading: field('heading').value,
       speakers: mapping(field('speakers').value, '说话人映射'),
     });
-    const result = await response.json();
     if (project !== openProject?.id) return;
     if (scenario.value !== previous) throw new Error('生成期间 Scenario 已编辑，请重新生成或先下载当前稿。');
     showScenario(result.scenario);
-    message(`Scenario 已由${result.engine === 'openai-compatible' ? 'LLM' : '规则解析'}生成。请校对 ${result.pending.length} 条待确认的对白。`);
+    reportNodeOutput('scenario', {reference: {kind: 'scenario', id: result.scenario_id},
+      label: '本次生成的 Scenario', fingerprint: editorFingerprint()});
+    message(`Scenario 已由${result.model_ref?.model || '本地规则解析'}生成。请校对 ${result.pending.length} 条待确认的对白。`);
   });
 });
 
@@ -1202,12 +1382,14 @@ async function refreshProjectHistory() {
   updateWorkspaceStatus();
 }
 
-async function loadProject(id, revision) {
+async function loadProject(id, revision, destination = pendingProjectView || 'projects') {
   if (!id) throw new Error('请选择要打开的项目。');
   clearTimeout(projectWriteTimer);
   const response = await request('/api/workspace/project/open', {id, revision});
   const project = await response.json();
   openProject = {id: project.id, revision: project.revision};
+  pendingProjectView = '';
+  projectAddress(project.id);
   projectHistoryItems = [];
   field('project-name').value = project.title;
   applyProjectConfig(project.config);
@@ -1227,7 +1409,7 @@ async function loadProject(id, revision) {
   updateProjectScope();
   await refreshProjects();
   await refreshProjectHistory();
-  goWorkspace('projects');
+  goWorkspace(destination);
   message(`已打开「${project.title}」。`);
 }
 
@@ -1245,6 +1427,7 @@ async function saveProject(copy = false, title = field('project-name').value.tri
   if (scope !== openProject) return;
   const unchanged = fingerprint === editorFingerprint();
   openProject = {id: project.id, revision: project.revision};
+  projectAddress(project.id);
   if (unchanged) field('project-name').value = project.title;
   for (const [name, id] of Object.entries(project.assets || {})) {
     const file = uploads.get(name);
@@ -1309,6 +1492,8 @@ field('project-keep').onclick = (event) => {
 };
 function resetProjectEditor() {
   openProject = null;
+  pendingProjectView = '';
+  projectAddress();
   projectHistoryItems = [];
   field('project-name').value = '';
   field('project-save-copy').disabled = true;
@@ -1364,6 +1549,7 @@ field('config-llm-scenario-enabled').addEventListener('change', () => {
     scenarioLlmOverrideInitialized = true;
   }
   updateScenarioLlmOverrideUi();
+  refreshApiProviders();
   updateWorkspaceStatus();
 });
 for (const id of ['heading', 'speakers', ...projectConfigIds]) field(id).addEventListener('input', updateWorkspaceStatus);
@@ -1468,4 +1654,12 @@ new MutationObserver(updateWorkspaceStatus).observe(field('image-gallery'), {chi
 renderFiles();
 editorBaseline = editorFingerprint();
 updateWorkspaceStatus();
+const linkedProject = new URLSearchParams(location.search).get('project');
+const linkedWorkspace = location.hash.slice(1) || 'projects';
 workspaceView();
+if (linkedProject) document.addEventListener('DOMContentLoaded', () => {
+  loadProject(linkedProject, undefined, linkedWorkspace).catch((error) => {
+    if (!openProject) projectAddress();
+    message(error.message, true);
+  });
+}, {once: true});

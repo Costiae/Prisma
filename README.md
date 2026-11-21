@@ -27,7 +27,7 @@ python webui.py
 | 模式 | 使用方法 |
 | --- | --- |
 | 本地模型 | Windows x64 使用 Vulkan 推理和 CUDA 训练；Apple Silicon Mac 可用 MPS 训练 SD 1.x/SDXL LoRA，也可用 Apple MLX 在 512 分辨率训练 Iris-3B 或动漫专用 Anima Base LoRA，并通过 MLX 本地生成。 |
-| 在线模型 | 在启动 `webui.py` 的进程环境中设置 `OPENAI_API_KEY`，再切换到「在线模型」。请求走 OpenAI 图像 API，会发送提示词并使用账户额度。密钥只留在服务端环境中。 |
+| 在线模型 | 在「API Provider」选择 OpenAI 或 Anthropic 兼容格式，填写地址和 Key。使用 Fetch Models 获取模型及 metadata，也可手动声明模型。在页面下方保存文本、图像和音频默认模型。流程节点可继承默认模型或指定目录中的模型，并调整生成参数。 |
 
 本地模式会查找 `E:\LLM\prisma-media`（可用 `PRISMA_MEDIA_HOME` 指定已有安装的位置）和本项目以往的 R1/R2/R3 权重。选择「套用 R2 / R3 对照配置」可按相同 Seed 比较 R2、R3 各自 200 步、0.35 权重的结果。两支权重相互独立，可以分别继续使用。
 

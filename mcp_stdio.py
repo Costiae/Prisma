@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from pathlib import Path
 import sys
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
@@ -11,9 +12,19 @@ from prisma_mcp import rpc_error
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--port', type=int, help='override the port discovered for the image workspace')
+    parser.add_argument('--image-workspace', type=Path,
+                        help='image workspace whose running Prisma service should receive MCP requests')
     options = parser.parse_args()
-    endpoint = f'http://127.0.0.1:{options.port}/mcp'
+    workspace = (options.image_workspace or Path(__file__).resolve().parent / 'build' / 'prisma-images').resolve()
+    base = None
+    if options.port is None:
+        try:
+            service = json.loads((workspace / '.service.json').read_text(encoding='utf-8'))
+            base = service.get('base')
+        except (OSError, ValueError):
+            pass
+    endpoint = f'{base.rstrip("/")}/mcp' if base else f'http://127.0.0.1:{options.port or 8765}/mcp'
     opener = build_opener(ProxyHandler({}))
     protocol = None
     for raw in sys.stdin.buffer:

@@ -36,6 +36,7 @@
     if (!field('assets').hidden && error) message(text, true);
   }
 
+
   async function json(path, data) {
     if (data !== undefined) {
       const payload = path.startsWith('/library/') ? data : {...data, ...projectScope()};
@@ -112,8 +113,10 @@
     const animaReady = environment?.training_supported && anima?.available && anima?.trainer_available;
     const sd1MpsReady = environment?.training_supported && environment?.training_device?.includes('MPS')
       && sd1?.available && sd1?.trainer_available;
+    const chosenOnline = effectiveNodeModel('image-node-model');
+    const onlineProvider = providerCatalog.providers.find((provider) => provider.id === chosenOnline?.provider_id);
     const ready = local ? family === 'anima' ? animaReady : family === 'sdxl' ? sdxlReady
-      : sd1MpsReady || environment?.supported && environment.engine && environment.model : catalog?.online.ready;
+      : sd1MpsReady || environment?.supported && environment.engine && environment.model : Boolean(onlineProvider);
     const installModel = environment?.training_models?.find((model) => model.id === value('install-base'));
     const trainModel = environment?.training_models?.find((model) => model.id === value('train-base'));
     get('local').hidden = get('local').disabled = !local;
@@ -129,7 +132,8 @@
           : environment?.training_supported && !environment?.supported
             ? '本机可用 MPS 预览已安装的 SDXL LoRA；请选择 SDXL LoRA 或切换在线模型。'
             : '新环境请展开本地工具箱，拉取推理组件或完整 LoRA 工具链。')
-      : (catalog?.online.ready ? '生成时会把提示词发送给 OpenAI，并使用账户额度。' : '请设置服务端 OPENAI_API_KEY 并重启 WebUI。');
+      : (onlineProvider ? `将通过 ${onlineProvider.name} 调用 ${chosenOnline.model}。`
+        : '请在此选择可用模型，或在「API Provider」设置全局默认图像模型。');
     get('generate').disabled = working || !ready;
     get('export-lora').disabled = exportingLora || !value('lora');
     get('use-existing-lora').disabled = !value('existing-lora-select');
@@ -180,7 +184,6 @@
       'config-image-base': [['自动选择已安装底模', ''], ...models.filter(([, id]) => id !== 'iris3b')],
       'config-image-lora': [['底模', ''], ...loras],
       'config-image-compare': [['关闭对照', 'none'], ['底模', ''], ...loras],
-      'config-image-online-model': [['使用服务默认模型', ''], ...catalog.online.models.map((model) => [model, model])],
       'config-train-base': [['自动选择已安装底模', ''], ...models],
       'config-train-dataset': [['每次手动选择', ''],
         ...catalog.sources.filter((source) => source.saved).map(({label, id}) => [label, id])],
@@ -217,7 +220,7 @@
       ['weight', generation.weight], ['local-size', generation.size], ['seed', generation.seed ?? ''],
       ['sampler', generation.sampler], ['steps', generation.steps], ['cfg', generation.cfg],
       ['count', generation.count], ['negative', generation.negative], ['online-size', generation.online_size],
-      ['quality', generation.quality], ['model', generation.online_model]]) {
+      ['quality', generation.quality]]) {
       setValue(name, value);
     }
     updateCompareOptions();
@@ -252,7 +255,6 @@
     const models = env.training_models || [];
     const options = catalog.loras.filter((lora) => ['sd1', 'sdxl', 'anima'].includes(lora.family))
       .map((lora) => new Option(lora.label, lora.id));
-    retainOptions(get('model'), catalog.online.models.map((name) => new Option(name, name)));
     retainOptions(get('dataset-source'), [new Option('仅使用上传图片', ''), ...catalog.sources.map((s) => new Option(s.label, s.id))]);
     retainOptions(get('train-dataset'), [new Option('先保存数据集', ''), ...catalog.sources.filter((s) => s.saved).map((s) => new Option(s.label, s.id))]);
     retainOptions(get('install-base'), models.map((model) => new Option(model.label, model.id)),
@@ -334,8 +336,18 @@
       progress.value = 100 * job.progress.bytes / job.progress.total;
       phase.textContent += ` · ${(job.progress.bytes / 1048576).toFixed(0)} / ${(job.progress.total / 1048576).toFixed(0)} MiB`;
     } else progress.removeAttribute('value');
-    get('log-box').hidden = !job?.log;
-    if (get('log').textContent !== (job?.log || '')) get('log').textContent = job?.log || '';
+    const logBox = get('log-box');
+    logBox.hidden = !job;
+    if (job && logBox.dataset.job !== job.id) {
+      logBox.dataset.job = job.id;
+      logBox.open = true;
+    }
+    const log = job ? [
+      `任务 ${job.id} · ${job.options.model || job.options.base_model || '本地工具'}`,
+      `[${job.started}] 已提交`, job.log, job.ended && `[${job.ended}] ${job.phase}${job.error ? ' · ' + job.error : ''}`,
+      job.state === 'done' && job.kind === 'generate' ? `已保存 ${job.images.length} 张候选图` : '',
+    ].filter(Boolean).join('\n') : '';
+    if (get('log').textContent !== log) get('log').textContent = log;
 
     const pending = Boolean(activeState(job));
     const completed = job?.state === 'done';
@@ -487,7 +499,9 @@
       Object.assign(values, {negative: options.negative, seed: options.seed, steps: options.steps, cfg: options.cfg,
         sampler: options.sampler, 'local-size': size, lora: options.loras[0].id,
         compare: options.loras[1]?.id ?? 'none', weight: options.loras[0].weight ?? 0.35});
-    } else Object.assign(values, {model: options.model, 'online-size': options.size, quality: options.quality});
+    } else {
+      Object.assign(values, {'online-size': options.size, quality: options.quality});
+    }
     for (const [id, setting] of Object.entries(values)) get(id).value = setting;
     controls();
     report('已恢复本次任务的生成参数。');
@@ -574,6 +588,7 @@
   get('train-rank').oninput = () => { trainingRankTouched = true; };
   get('install-train').onclick = () => submitJob('/install', {target: 'training', base_model: value('install-base')});
   get('form').querySelectorAll('[name="image-mode"]').forEach((input) => input.onchange = controls);
+  field('image-node-model').addEventListener('change', controls);
   get('compare').onchange = controls;
   get('export-lora').onclick = async () => {
     const lora = value('lora');
@@ -666,7 +681,9 @@
       Object.assign(data, {negative: value('negative'), loras, base_model: selectedLoraFamily(), width, height, cfg: numeric('cfg'),
         steps: numeric('steps'), sampler: value('sampler'), weight: numeric('weight'),
         seed: value('seed') ? numeric('seed') : null});
-    } else Object.assign(data, {model: value('model'), size: value('online-size'), quality: value('quality')});
+    } else Object.assign(data, {
+      model_override: readProviderRef(field('image-node-model').value),
+      size: value('online-size'), quality: value('quality')});
     submitJob('/generate', data);
   };
 
@@ -1056,8 +1073,7 @@
     } else report('该 LoRA 当前不可用。请刷新权重列表。', true);
   });
   document.addEventListener('prisma-node-tools', ({detail}) => {
-    if (catalog && ['online', 'generation', 'train'].includes(detail)) applyProjectDefaults();
-    if (detail === 'online') { setMode('online'); controls(); }
+    if (catalog && ['generation', 'train'].includes(detail)) applyProjectDefaults();
     if (detail === 'generation') {
       const ref = nodeInputs.find((item) => item.kind === 'prompt');
       if (ref) usePassedPrompt(ref, {onlyEmpty: true});
@@ -1116,6 +1132,9 @@
     controls();
     if (!field('assets').hidden) loadLibrary();
     refresh().catch((error) => report(error.message, true));
+  });
+  document.addEventListener('prisma-provider-catalog', () => {
+    controls();
   });
 
   controls();

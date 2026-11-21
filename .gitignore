@@ -3,6 +3,7 @@
 /examples/*.txt
 /build/
 __pycache__/
+/web/editor-build/node_modules/
 
 # Model artifacts are downloaded or trained locally.
 *.safetensors

@@ -24,7 +24,7 @@ MEDIA_TYPES = {
 ID = re.compile(r'[0-9a-f]{16}|[0-9a-f]{64}')
 DEFAULT_PROJECT_CONFIG = {
     'resolution': {'width': 1280, 'height': 720},
-    'llm': {'mode': 'rules', 'base_url': 'https://api.openai.com/v1', 'model': 'gpt-4o-mini',
+    'llm': {'mode': 'rules', 'base_url': '', 'model': '',
             'temperature': 0.2, 'max_tokens': 4096, 'timeout': 180,
             'system_prompt': ('Convert the supplied novel text into Prisma Scenario JSON version 1. '
                              'Return only one JSON object with version and chapters. Each chapter has id, title, scenes; '
@@ -54,7 +54,7 @@ def validate_llm_settings(llm, label='LLM'):
     for key, limit in (('base_url', 512), ('model', 160)):
         if not isinstance(llm.get(key), str) or len(llm[key]) > limit:
             raise ValueError(f'{label}「{key}」格式无效。')
-    if llm['mode'] == 'openai-compatible':
+    if llm['mode'] == 'openai-compatible' and llm['base_url']:
         endpoint = urlparse(llm['base_url'])
         if endpoint.scheme not in ('http', 'https') or not endpoint.netloc or endpoint.username or endpoint.password:
             raise ValueError(f'{label} API 地址须为不含账号密码的 HTTP(S) 地址。')
@@ -90,6 +90,8 @@ def normalize_project_config(value):
         raise ValueError('项目分辨率须为整数，宽度 640–7680，高度 360–4320。')
 
     llm = config['llm']
+    if not llm.get('provider_id') and llm.get('model') and not llm.get('base_url'):
+        llm['base_url'] = 'https://api.openai.com/v1'
     validate_llm_settings(llm, '项目全局 LLM')
     overrides = config['llm_overrides']
     scenario_override = overrides.get('scenario', {})
@@ -229,10 +231,13 @@ class WorkspaceResources:
                 base = dict(existing, links=merged)
             return self._save(dict(base, id=ident))
 
-    def document(self, kind, text, links=(), *, project=None):
+    def document(self, kind, text, links=(), *, project=None, generation=None):
         if kind == 'scenario':
             data = normalize_scenario(text)
-            return self.note(kind, data['chapters'][0]['title'], {'scenario': data}, links, project=project)
+            metadata = {'scenario': data}
+            if generation is not None:
+                metadata['generation'] = generation
+            return self.note(kind, data['chapters'][0]['title'], metadata, links, project=project)
         return self.note(kind, text_title(text, kind), {'text': text}, links, project=project)
 
     def prompt(self, positive, negative, *, source=None, context=None, derived_from=None, project=None):
@@ -270,12 +275,14 @@ class WorkspaceResources:
             metadata['sha256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
         return self.note('asset', path.name, metadata)
 
-    def register_asset(self, name, *, blob=None, artifact=None, origin=None, project=None):
+    def register_asset(self, name, *, blob=None, artifact=None, origin=None, project=None, generation=None):
         name = asset_name(name)
         if (blob is None) == (artifact is None):
             raise ValueError('请提供一个素材文件或生成产物。')
         links = []
         metadata = dict(name=name, media_type=MEDIA_TYPES[Path(name).suffix.lower()])
+        if generation is not None:
+            metadata['generation'] = generation
         if artifact is not None:
             job, original = artifact.get('job_id'), artifact.get('name')
             path = self.artifact(job, 'images', original)

@@ -23,6 +23,7 @@ import zipfile
 
 from image_jobs import INDEX_PROJECTION, Jobs, JOB_ID, now, write_json
 from image_library import ImageLibrary, KINDS, artifact_id, timestamp
+from api_providers import ApiProviders, api_request
 from workspace_resources import MEDIA_TYPES, WorkspaceResources, content_id
 from prisma import normalize_scenario
 
@@ -95,6 +96,7 @@ TOKENIZER_FILES = {
 }
 CLIP_URL = 'https://huggingface.co/openai/clip-vit-large-patch14/resolve/32bd64288804d66eefd0ccbe215aa642df71cc41'
 ONLINE_MODELS = ('gpt-image-1.5', 'gpt-image-2.5-flare', 'gpt-image-1-mini')
+OPENAI_API_BASE = 'https://api.openai.com/v1'
 ONLINE_SIZES = ('1024x1024', '1024x1536', '1536x1024')
 SAMPLERS = ('euler_a', 'euler', 'dpm++2m', 'er_sde')
 DIFFUSERS_SAMPLERS = ('euler_a', 'euler', 'dpm++2m')
@@ -250,15 +252,10 @@ def unpack(job, archive, directory, *, strip_root=None, only=None, limit=240 * 1
                 shutil.copyfileobj(read, write)
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-
-
 def record_model(job):
     options = job.get('options', {})
     if options.get('mode') == 'online' and options.get('model'):
-        return f'openai:{options["model"]}'
+        return f'{options.get("provider_id", "openai")}:{options["model"]}'
     value = options.get('base_model') or options.get('model')
     return {BASE_NAME: 'sd1', 'anything-v3': 'sd1', SDXL_NAME: 'sdxl'}.get(
         value, value or ('sd1' if job.get('kind') in ('train', 'generate', 'install') else None))
@@ -278,6 +275,7 @@ class ImageToolkit:
         self.dataset_root = self.home / 'datasets'
         self.lora_root = self.home / 'loras'
         self.library = ImageLibrary(self.home)
+        self.api_providers = ApiProviders(self.library)
         self.resources = WorkspaceResources(self.library, self.artifact)
         self.jobs = Jobs(self.home / 'jobs', self.library, self.index_job)
         self._library_lock = threading.RLock()
@@ -471,6 +469,8 @@ class ImageToolkit:
             links.append(('continues_from', 'lora', parent.get('id') if isinstance(parent, dict) else parent))
         if options.get('replay_of'):
             links.append(('replay_of', 'job', options['replay_of']))
+        if options.get('script_id'):
+            links.append(('uses_script', 'script', options['script_id']))
         if job_kind == 'generate' and options.get('prompt'):
             prompt = options.get('prompt_id') or self.resources.prompt(
                 options['prompt'], options.get('negative') or '', project=project)
@@ -606,8 +606,11 @@ class ImageToolkit:
                 metadata['installation'] = actual_revision
             records.append(dict(kind='model', id=ident, label=profile['label'],
                                 path=path, state='installed' if path else 'not_installed', metadata=metadata))
-        records.extend(dict(kind='model', id=f'openai:{model}', label=model, state='remote',
-                            metadata={'provider': 'OpenAI'}) for model in ONLINE_MODELS)
+        for provider in self.api_providers.list()['providers']:
+            records.extend(dict(kind='model', id=f'{provider["id"]}:{model["id"]}',
+                                label=model['name'], state='remote',
+                                metadata={'provider_id': provider['id'], 'kind': model['kind'], 'model': model})
+                           for model in provider['models'] if model['kind'])
         self.library.replace('models', records)
 
     def index_standalone_loras(self):
@@ -796,8 +799,15 @@ class ImageToolkit:
         trainer = self.trainer()
         mflux = self.mflux_environment()
         trainer_path = trainer[0] if trainer else mflux[0] if mflux else None
+        online_default = self.api_providers.defaults().get('image')
+        online_providers = self.api_providers.list()['providers']
+        selected = next((item for item in online_providers
+                         if online_default and item['id'] == online_default['provider_id']), None)
+        available = [item for item in (selected or {}).get('models', []) if item['kind'] == 'image']
+        online_models = [model['metadata'] | {'id': model['id']} for model in available]
         return {
-            'online': {'ready': bool(os.environ.get('OPENAI_API_KEY', '').strip()), 'models': ONLINE_MODELS},
+            'online': {'ready': bool(available), 'default': online_default,
+                       'models': [model['id'] for model in online_models], 'metadata': online_models},
             'local': {'supported': self.windows, 'training_supported': self.training_supported,
                       'engine': str(self.engine() or ''), 'model': str(self.base() or ''),
                       'trainer': str(trainer_path or ''), 'workspace': str(self.home),
@@ -818,6 +828,32 @@ class ImageToolkit:
                         if not JOB_ID.fullmatch(ident) or ident in dataset_ids],
             'jobs': self.jobs.recent(project=project, shared=project is None),
         }
+
+    def image_api_models(self, data=None):
+        if (data or {}).get('action') == 'test':
+            result = self.api_providers.test({'id': 'openai'})
+            return dict(result, image_models=sum(item['kind'] == 'image' for item in
+                        self.api_providers.get('openai')['models']))
+        result = self.api_providers.models({'id': 'openai'})
+        self.index_models()
+        models = [item['metadata'] | {'id': item['id']} for item in result['models'] if item['kind'] == 'image']
+        return {'models': models, 'count': len(models)}
+
+    def image_api_credential(self, data):
+        if not isinstance(data, dict):
+            raise ValueError('图像 API 凭据请求须为 JSON 对象。')
+        action = data.get('action')
+        if action == 'status':
+            return {'configured': bool(self.api_providers.get('openai')['api_key']), 'storage': '本机 Prisma 数据库'}
+        if action == 'save':
+            provider = self.api_providers.get('openai')
+            saved = self.api_providers.save(dict(provider, api_key=data.get('api_key', '')))
+            return {'configured': saved['configured'], 'storage': '本机 Prisma 数据库'}
+        if action == 'clear':
+            provider = self.api_providers.get('openai')
+            saved = self.api_providers.save(dict(provider, api_key=''))
+            return {'configured': saved['configured'], 'storage': '本机 Prisma 数据库'}
+        raise ValueError('未知的图像 API 凭据操作。')
 
     def list_source(self, ident):
         sources = self.sources()
@@ -1475,9 +1511,10 @@ class ImageToolkit:
     def generate(self, data, *, original=None):
         data = dict(data)
         if project := data.get('project_id'):
-            defaults = self.resources.load_project({'id': project})['config']['generation']
+            project_config = self.resources.load_project({'id': project})['config']
+            defaults = project_config['generation']
             for key, value in {
-                'mode': defaults['mode'], 'count': defaults['count'], 'model': defaults['online_model'],
+                'mode': defaults['mode'], 'count': defaults['count'],
                 'size': defaults['online_size'], 'quality': defaults['quality'], 'negative': defaults['negative'],
                 'base_model': defaults['base_model'], 'width': int(defaults['size'].split('x')[0]),
                 'height': int(defaults['size'].split('x')[1]), 'cfg': defaults['cfg'], 'steps': defaults['steps'],
@@ -1513,13 +1550,24 @@ class ImageToolkit:
             return self.jobs.start('generate', options, work)
 
         if mode == 'online':
-            key = os.environ.get('OPENAI_API_KEY', '').strip()
-            if not key:
-                raise ValueError('请在启动 WebUI 前设置 OPENAI_API_KEY，然后重启服务。')
-            options.update(model=choice(data.get('model', ONLINE_MODELS[0]), ONLINE_MODELS, '在线模型'),
+            override = data.get('model_override')
+            ident, model = '', ''
+            if original:
+                ident, model = data.get('provider_id') or 'openai', data.get('model')
+                override = {'provider_id': ident, 'model': model}
+            try:
+                provider, declared = self.api_providers.resolve_node_model('image', override)
+            except ValueError:
+                if ident != 'openai' or model not in ONLINE_MODELS:
+                    raise
+                provider, declared = self.api_providers.get('openai'), {'id': model}
+                if provider['protocol'] != 'openai' or provider['base_url'] != OPENAI_API_BASE:
+                    raise
+            options.update(provider_id=provider['id'], base_url=provider['base_url'],
+                           model=declared['id'],
                            size=choice(data.get('size', ONLINE_SIZES[0]), ONLINE_SIZES, '图片尺寸'),
                            quality=choice(data.get('quality', 'medium'), ('low', 'medium', 'high'), '质量'))
-            return queue(lambda job: self.online_generate(job, options, key))
+            return queue(lambda job: self.online_generate(job, options, provider))
 
         negative = string(data.get('negative', ''), '负面提示词', 4000, required=False)
         if re.search(r'<\s*lora\s*[:>]', prompt + '\n' + negative, re.IGNORECASE):
@@ -1723,27 +1771,21 @@ class ImageToolkit:
         return queue(work)
 
     @staticmethod
-    def online_generate(job, options, key):
-        job.phase('等待 OpenAI 生成图片')
-        payload = dict(model=options['model'], prompt=options['prompt'], n=options['count'],
-                       size=options['size'], quality=options['quality'], output_format='png')
-        req = urllib.request.Request('https://api.openai.com/v1/images/generations',
-                                     data=json.dumps(payload).encode(),
-                                     headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'})
+    def online_generate(job, options, provider):
+        job.phase(f'正在请求 POST /images/generations · {provider["name"]} · {options["model"]}')
+        model = options['model']
+        payload = dict(model=model, prompt=options['prompt'], n=options['count'], size=options['size'],
+                       quality=options['quality'])
+        if model.startswith('gpt-image'):
+            payload['output_format'] = 'png'
+        else:
+            payload['response_format'] = 'b64_json'
+        status, result = api_request(provider, 'images/generations', payload, limit=96 * 1024 * 1024,
+                                     timeout=300, response_meta=True)
+        job.phase(f'收到 HTTP {status}，正在检查并保存图片')
         try:
-            with urllib.request.build_opener(NoRedirect()).open(req, timeout=300) as response:
-                limit = 96 * 1024 * 1024
-                raw = response.read(limit + 1)
-                if len(raw) > limit:
-                    raise ValueError('在线服务返回的图片过大。')
-                content = json.loads(raw)['data']
-        except urllib.error.HTTPError as error:
-            reasons = {400: '请求或模型参数未获接受', 401: 'API 密钥不可用', 403: '账号无模型权限',
-                       429: '账户额度或请求频率受限'}
-            raise ValueError(f'OpenAI 请求失败（HTTP {error.code}）：{reasons.get(error.code, "请稍后重试")}。') from None
-        except (urllib.error.URLError, TimeoutError):
-            raise ValueError('无法连接 OpenAI，或等待图片超时。') from None
-        except (KeyError, TypeError, json.JSONDecodeError, UnicodeError):
+            content = result['data']
+        except (KeyError, TypeError):
             raise ValueError('在线服务返回了无法读取的图片数据。') from None
         job.check()
         if not isinstance(content, list) or not 1 <= len(content) <= options['count']:

@@ -2,15 +2,20 @@
 
 import argparse
 import binascii
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
+import secrets
 import shutil
 from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.request import ProxyHandler, Request, build_opener
 
 from image_jobs import Busy, JOB_ID, own_workspace
 from image_toolkit import IMAGE_TYPES, ImageToolkit, child_file
 from lora_export import ARCHIVE_NAME, save_export
+from pipeline_workflow import ROADMAP
 from prisma_mcp import PrismaMCP, VERSIONS, rpc_error
 from prisma_workflow import inspect, require_text
 from script_story import inspect_story
@@ -21,11 +26,14 @@ STATIC = {
     "/": ("web/index.html", "text/html; charset=utf-8"),
     "/app.css": ("web/app.css", "text/css; charset=utf-8"),
     "/app.js": ("web/app.js", "text/javascript; charset=utf-8"),
+    "/providers.js": ("web/providers.js", "text/javascript; charset=utf-8"),
     "/images.js": ("web/images.js", "text/javascript; charset=utf-8"),
     "/pipeline.js": ("web/pipeline.js", "text/javascript; charset=utf-8"),
     "/pipeline-layout.js": ("web/pipeline-layout.js", "text/javascript; charset=utf-8"),
     "/script-workbench.js": ("web/script-workbench.js", "text/javascript; charset=utf-8"),
     "/script-ide.js": ("web/script-ide.js", "text/javascript; charset=utf-8"),
+    "/script-ide-workspace.js": ("web/script-ide-workspace.js", "text/javascript; charset=utf-8"),
+    "/editor-engine.js": ("web/editor-engine.js", "text/javascript; charset=utf-8"),
     "/script-story.js": ("web/script-story.js", "text/javascript; charset=utf-8"),
     "/docs/media-prompt-guide.md": ("docs/media-prompt-guide.md", "text/plain; charset=utf-8"),
     "/docs/media-checklist.md": ("docs/media-checklist.md", "text/plain; charset=utf-8"),
@@ -36,18 +44,31 @@ STATIC = {
 MAX_REQUEST = 64 * 1024 * 1024
 
 
+def roadmap_nav_links() -> bytes:
+    return '\n'.join(
+        f'<a href="#stage-{node["id"]}">{escape(node["title"])}</a>'
+        for node in ROADMAP['nodes']
+    ).encode('utf-8')
+
+
 class Handler(BaseHTTPRequestHandler):
-    def respond(self, status: int, content_type: str, body: bytes, *, attachment: bool = False) -> None:
+    def respond(self, status: int, content_type: str, body: bytes, *, attachment: bool = False, nonce=None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'")
+        # CodeMirror uses inline style attributes for editor geometry.
+        style = f"; style-src 'self' 'nonce-{nonce}'; style-src-attr 'unsafe-inline'" if nonce else ''
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'" + style)
         if attachment:
             self.send_header("Content-Disposition", 'attachment; filename="prisma-renpy.zip"')
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except ConnectionError:
+            # A browser navigation can cancel pending requests from the previous view.
+            return
 
     def respond_json(self, status: int, data: dict) -> None:
         self.respond(status, "application/json; charset=utf-8", json.dumps(data, ensure_ascii=False).encode())
@@ -67,11 +88,23 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         path = url.path
         query = parse_qs(url.query)
+        if path == '/api/health':
+            self.respond_json(200, {'ok': True, 'service': 'prisma', 'port': self.server.server_port})
+            return
         if path == '/mcp':
             self.mcp_no_stream()
             return
         if path.startswith('/api/exports/'):
             self.get_export(path)
+            return
+        if path.startswith('/api/script/sdk/files/'):
+            try:
+                ident, index = path.removeprefix('/api/script/sdk/files/').split('/')
+                data = {'project_id': query.get('project_id', [''])[0], 'job_id': ident}
+                artifact, filename = self.server.mcp.renpy_sdk.distribution(data, int(index))
+                self.send_file(artifact, 'application/octet-stream', attachment=filename)
+            except (OSError, ValueError):
+                self.respond_json(404, {'error': '发行包不存在。'})
             return
         if path.startswith('/api/images/'):
             self.get_image_resource(path, project=query.get('project_id', [None])[0])
@@ -100,7 +133,11 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self.respond_json(404, {"error": "本地文件不存在。"})
             return
-        self.respond(200, mime, content)
+        nonce = secrets.token_urlsafe() if path == '/' else None
+        if nonce:
+            content = content.replace(b'__PRISMA_STYLE_NONCE__', nonce.encode('ascii'), 1)
+            content = content.replace(b'<!-- PRISMA_ROADMAP_LINKS -->', roadmap_nav_links(), 1)
+        self.respond(200, mime, content, nonce=nonce)
 
     def mcp_no_stream(self):
         self.send_response(405)
@@ -180,6 +217,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         image_routes = {
             '/api/images/generate': self.server.images.generate,
+            '/api/images/online/models': self.server.images.image_api_models,
+            '/api/images/online/credential': self.server.images.image_api_credential,
             '/api/images/install': self.server.images.provision,
             '/api/images/datasets': self.server.images.save_dataset,
             '/api/images/datasets/restore': self.server.images.restore_dataset,
@@ -192,14 +231,40 @@ class Handler(BaseHTTPRequestHandler):
         studio = self.server.mcp.workflow
         pipeline = self.server.mcp.pipeline
         editor = self.server.mcp.script_editor
+        sdk = self.server.mcp.renpy_sdk
         projects = self.server.images.resources
         routes = {'/api/draft': studio.draft, '/api/scenes': inspect, '/api/scenario/anchor': studio.anchor,
                   '/api/llm/status': studio.llm_status,
+                  '/api/llm/api': studio.llm_api,
+                  '/api/llm/credential': studio.llm_credential,
+                  '/api/providers/list': studio.providers.list,
+                  '/api/providers/save': self.server.mcp.provider_save,
+                  '/api/providers/delete': self.server.mcp.provider_delete,
+                  '/api/providers/models': self.server.mcp.provider_models,
+                  '/api/providers/test': studio.providers.test,
+                  '/api/providers/model/save': self.server.mcp.provider_model_save,
+                  '/api/providers/model/test': studio.providers.test_model,
+                  '/api/providers/defaults/save': studio.providers.save_defaults,
+                  '/api/speech/generate': studio.speech,
+                  '/api/generation/log': studio.generation_log,
                   '/api/scenario/save': studio.save_documents,
                   '/api/script/preview': studio.preview_script,
                   '/api/script/bind': studio.bind_script,
                   '/api/script/editor/open': editor.open, '/api/script/editor/save': editor.save,
                   '/api/script/editor/asset': editor.prepare_asset,
+                  '/api/script/editor/localized-asset': editor.localized_asset,
+                  '/api/script/editor/check': editor.check,
+                  '/api/script/editor/starter': editor.starter,
+                  '/api/script/editor/story': editor.story,
+                  '/api/script/editor/screens': editor.screens,
+                  '/api/script/editor/variables': editor.variables,
+                  '/api/script/editor/history': editor.history,
+                  '/api/script/editor/diff': editor.diff,
+                  '/api/script/editor/merge': editor.merge,
+                  '/api/script/editor/variants': editor.variants,
+                  '/api/script/sdk/status': sdk.status, '/api/script/sdk/start': sdk.start,
+                  '/api/script/sdk/translations': sdk.translations,
+                  '/api/script/sdk/builds': sdk.builds,
                   '/api/script/story': inspect_story, '/api/script/story/edit': editor.edit_story,
                   '/api/asset-prompt': studio.asset_prompt,
                   '/api/workspace/project/save': self.server.images.resources.save_project,
@@ -283,19 +348,55 @@ def main() -> None:
     args = parser.parse_args()
     images = ImageToolkit(ROOT, workspace=args.image_workspace, reference=args.reference_dir,
                           use_existing=not args.no_existing_media)
+    manifest = images.home / '.service.json'
     try:
         with own_workspace(images.home), ThreadingHTTPServer(('localhost', args.port), Handler) as server:
             images.refresh_library()
             server.images = images
+            with images.library.connection() as db:
+                db.execute("UPDATE generation_runs SET state='interrupted' WHERE state='running'")
             base = f'http://127.0.0.1:{server.server_port}'
             server.mcp = PrismaMCP(images, base)
+            temporary = manifest.with_suffix('.json.part')
+            temporary.write_text(json.dumps({'base': base, 'pid': os.getpid()}), encoding='utf-8')
+            temporary.replace(manifest)
             print(f'Prisma Web UI: {base}\nPrisma MCP: {base}/mcp', flush=True)
             try:
                 server.serve_forever()
             except KeyboardInterrupt:
                 if images.jobs.active:
                     images.jobs.active.cancel()
+            finally:
+                try:
+                    current = json.loads(manifest.read_text(encoding='utf-8'))
+                    if current.get('pid') == os.getpid():
+                        manifest.unlink(missing_ok=True)
+                except (OSError, ValueError):
+                    pass
     except Busy as error:
+        base = f'http://127.0.0.1:{args.port}'
+        try:
+            current = json.loads(manifest.read_text(encoding='utf-8'))
+            base = current['base'].rstrip('/')
+        except (KeyError, OSError, ValueError):
+            pass
+        try:
+            opener = build_opener(ProxyHandler({}))
+            probe = json.dumps({
+                'jsonrpc': '2.0', 'id': 'prisma-service-probe', 'method': 'initialize',
+                'params': {'protocolVersion': '2025-03-26', 'capabilities': {},
+                           'clientInfo': {'name': 'Prisma service probe', 'version': '1'}},
+            }).encode('utf-8')
+            request = Request(f'{base}/mcp', data=probe, method='POST', headers={
+                'Content-Type': 'application/json', 'Accept': 'application/json',
+            })
+            with opener.open(request, timeout=2) as response:
+                result = json.load(response)
+            if result.get('jsonrpc') == '2.0' and result.get('id') == 'prisma-service-probe' and 'result' in result:
+                print(f'已连接到使用此工作目录的 Prisma 服务：\nWebUI: {base}/#projects\nMCP: {base}/mcp', flush=True)
+                return
+        except (OSError, ValueError):
+            pass
         parser.exit(1, f'{error}\n')
 
 

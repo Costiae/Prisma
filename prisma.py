@@ -542,6 +542,10 @@ def render_script(
 
 
 def build_project(output: Path, script: str, files: dict) -> None:
+    write_project(output, {'script.rpy': script}, files)
+
+
+def write_project(output: Path, sources: dict[str, str], files: dict[str, Path]) -> None:
     if output.exists():
         raise ValueError(f"output already exists: {output}. Choose a new directory.")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -549,10 +553,13 @@ def build_project(output: Path, script: str, files: dict) -> None:
         project = Path(temp) / "project"
         game = project / "game"
         game.mkdir(parents=True)
-        (game / "script.rpy").write_text(script, encoding="utf-8", newline="\n")
+        for destination, source in sources.items():
+            target = game / destination
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source, encoding="utf-8", newline="\n")
         for destination, source in files.items():
             target = game / destination
-            target.parent.mkdir(exist_ok=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
         project.rename(output)
 

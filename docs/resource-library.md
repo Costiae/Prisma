@@ -11,7 +11,10 @@
 - 项目卡片的「删除项目」将项目移入回收站。在回收站点「恢复项目」可以找回原项目、历史和文件。对应 MCP 工具为 `project_list`、`project_delete` 和 `project_restore_deleted`。
 - 打开项目后编辑内容会自动写入版本；顶部提供「写入」「历史记录」和「撤回」。历史版本可以恢复，恢复会新建一个版本以保留完整来路。MCP 提供 `project_history`、`project_undo` 和 `project_restore`。
 - 项目工作区的「项目配置」按用途设置文本模型、图像模型和训练底模。文本模型是项目全局 LLM；每个 LLM 任务默认继承它，只有任务的 `llm_overrides.<task>.enabled` 为 `true` 时才合并该任务的 `settings` 覆盖。当前 LLM 调用是 `scenario`。图像生成可分别配置本地底模与在线模型，LoRA 训练有独立训练底模。其他参数包括 LLM Temperature/Token 上限/请求超时/系统提示词、图像 LoRA/权重/尺寸/采样器/步数/CFG/Seed/候选数、训练数据集/续训来源/步数/保存间隔/Rank/学习率/重复次数/Seed、Ren’Py 输出分辨率与默认字体，以及资产提示词默认风格和负面提示词。图像与训练设置会作为该项目新任务的默认值；MCP 可在 `project_save` 的 `config` 中保存这些分组，未传入的字段使用默认值。
-- LLM 密钥由服务端环境变量 `PRISMA_LLM_API_KEY` 或 `OPENAI_API_KEY` 提供，页面仅显示密钥来源状态，不会将密钥写入项目。新项目及旧版本默认使用 1280 × 720；`project_save` 可用 `config: {"resolution":{"width":1920,"height":1080}}` 覆盖。
+- 「API Provider」集中维护连接。OpenAI 兼容接入 Chat Completions、图像生成和语音合成，Anthropic 兼容接入 Messages。域名后没有路径时使用 `/v1`，有路径时将其作为网关的 API 前缀。Fetch Models 保存 `/models` 返回的 metadata。目录不可用或用途识别有误时，可手动声明或编辑模型。连接测试检查模型接口权限。
+- 选中服务商后可直接搜索模型并查看能力。思考、多模态、图像／音频／视频输入、工具调用和结构化输出读取 API metadata；缺失时标为未知，可在「详情」手动修正并保留原始 metadata。每个模型的「发送测试」发出一次实际请求，可能消耗额度。最近一次结果记录接口、耗时、HTTP 状态及服务商返回的用量（若提供）。
+- 页面下方可分别保存工作区文本、图像和音频默认模型。节点选择 Provider 时默认继承对应模型，也可在节点内选择其他已声明的 Provider 和模型。改选保存在当前浏览器会话，按项目和节点隔离。试跑配置不会写回项目默认参数，运行记录保存实际用到的模型和参数。配音节点的本地路径用于导入已生成的音频。
+- Provider、Key、工作区默认和最近一次模型测试保存在 `catalog.sqlite3`。WebUI 和 MCP 共用 `api_providers`、`api_provider_save`、`api_provider_delete`、`api_provider_models`、`api_provider_model_save`、`api_provider_model_test`、`api_provider_test`、`api_model_defaults_save` 和 `speech_generate`。旧项目仍可读取已保存的 API 地址，Key 保存在工作区。
 - 原文转写、稳定台词 ID、手动保存 Scenario 与演出绑定、场景提示词和出图都会登记。图像任务保留实际使用的提示词及所选底模、LoRA 和项目。R1–R3 的旧 LoRA 数据关系来自工作目录配置的 `lora-transfer.json`。
 - 上传的图片、音频和字体按 SHA-256 存在 `media/`。复用生成图时引用任务原件。导出登记实际使用的 Scenario、演出绑定和素材，数据集、LoRA 和 Ren’Py 导出都可在资源目录找到。
 
@@ -19,15 +22,24 @@
 
 在「剧本」中点选一行，再点「为此句安排演出」，会打开「演出」并定位到相应台词。也可在「演出」直接生成脚本预览，再点选代码中的台词。右侧可预览当前项目的图片或试听音频，插入或替换演出动作。应用后会更新演出绑定和脚本预览。
 
-在侧栏打开「脚本 IDE」，从 Scenario 生成、导入 AI 生成的 `.rpy`，或新建入口场景 `start`。「剧情」是默认视图。可按场景修改台词，新建角色和场景，添加选项、跳转和演出。资产栏可预览并插入已通过素材。复杂语句可点「源码」定位原行，剧情操作会保留其它源码。
+侧栏一级入口「脚本 IDE」打开当前项目的全量工作区。路线图仍保留脚本节点、直接上下游和通过记录，两处读取同一个工程草稿。未选项目时，先选定入口再打开项目。窄屏用「项目导航」展开入口。
 
-「试玩本场」支持台词、分支、跳转和已登记的常见图像及音频语句。遇到 Python、自定义画面或其它复杂命令时，试玩会标出行号。两个编辑视图共用同一个草稿，用「保存草稿」或 `Ctrl+S` 保存版本。「载入上一版」把上一版放回编辑区，再保存就会产生一个新版本。
+从「演出绑定」点「在脚本 IDE 中编辑」，会在同一工作台打开当前项目。已有工程则打开原源码，首次使用时可把生成的演出预览载为草稿。带 `project` 的页面地址可以在刷新或新标签页中重新打开同一个项目和节点。
 
-在脚本节点点「通过」后，可直接点「下载已通过工程」。ZIP 使用这一版源码和它引用的项目资产。后续改 Scenario 或演出绑定时，可以在 IDE 显式重新生成。运行和完整语法检查使用 Ren’Py SDK。
+「工程」菜单可以创建可运行的起始工程、从 Scenario 生成 `script.rpy`，或导入整个 Ren’Py 工程及素材。工程树以 `game/` 为根，保留导入的相对路径。「源码」支持多标签、语法高亮、缩进、撤销、查找替换、符号跳转和全工程搜索。素材栏可预览媒体并插入已通过资产。「保存全部」或 `Ctrl+S` 保存整份源码与素材映射。
 
-MCP 用 `script_editor_open` 读取草稿或指定 `revision`。`script_preview` 返回可作为编辑起点的 `script` 和 `managed_assets`，`script_editor_asset` 返回可插入的语句及素材路径。用 `script_editor_save` 保存 `text`、`managed_assets` 和编辑基于的 `base`。随后向 `pipeline_action` 传入保存的 `script` 资源引用并通过脚本节点，`renpy_export` 接受该 `script_id` 和 `project_id`。
+- 「剧情」可跨文件编辑场景、角色、台词、选项、跳转和演出素材，或跳到对应的源码。自定义 Ren’Py 逻辑仍可在源码中编辑。「分支」显示可识别的静态去向。「剧情预览」从 `start` 或剧情页当前场景开始。
+- 「界面」可拖动文本、按钮、图片和色块，调整尺寸、可见条件和按钮动作，也可将一个界面作为组件复用。变量可绑定到控件文本，由按钮更新。界面和变量分别写入 `prisma_ui.rpy` 和 `prisma_variables.rpy`。手写或导入的界面可直接编辑源码。
+- 「本地化」用 SDK 生成 `tl/<language>/` 翻译模板，载入后作为源码修改。语言素材替换保留原资源路径，并由 Ren’Py 在运行时查找对应语言的替换文件。
+- 「版本」可查看每次保存后的源码与素材差异，把历史版本载成新草稿。「工程 → 合并最新版本」会合并分别修改的文件，并逐个询问有冲突的文件要保留哪份内容。
+- 「发布」可以在同一工作区检查、通过和下载工程 ZIP。通过记录会把脚本版本交给路线图的导出节点。启动 Prisma 时用 `PRISMA_RENPY_SDK` 指定 SDK 目录，可运行原生 Lint、实机试玩并构建 Windows、Linux 或 macOS 发行包。安装 SDK 的 Web 支持后也会提供 Web 选项。
+- 发行变体在 `prisma-variants.json` 中定义截止场景和排除路径。构建任务保留所用版本、目标平台、变体和日志。需要签名更新时，用 `PRISMA_RENPY_UPDATE_KEYS` 指定密钥目录。SDK 从目录读取该项目的 `<project_id>.pem` 并产出独立更新 ZIP。构建不会把更新包上传到外部。 [Ren’Py 命令行用法](https://www.renpy.org/doc/html/cli.html)
 
-`script_story_inspect` 返回场景目录、角色和选中场景的剧情行。`script_story_edit` 接收原稿 `text` 和 `operation`，返回局部修改后的 `text` 及新增的 `managed_assets`。把新增素材映射与原稿的映射合并后，再用 `script_editor_save` 保存。
+MCP 用 `script_editor_open` 读取草稿或指定 `revision`，用 `script_editor_save` 保存 `files`、`project_assets`、`managed_assets` 和所基于的 `base`。`files` 把相对路径映射到源码，`project_assets` 把相对路径映射到已登记的素材 ID。旧版 `text` 参数仍可更新 `script.rpy`。`script_editor_check` 检查工程。在脚本节点通过保存的版本后，`renpy_export` 接受 `script_id`，`renpy_sdk_start` 接受 `revision` 和 `mode`，两者均需 `project_id`。
+
+`script_editor_story` 读取全工程的场景与分支，`script_story_edit` 可用 `files` 和 `file` 编辑支持的跨文件跳转，也兼容原来的单文件 `text`。调用 `script_editor_screens` 和 `script_editor_variables` 生成界面与变量源码，`script_editor_history` 和 `script_editor_diff` 读取保存记录和差异，`script_editor_merge` 可预览草稿合并结果。用 `script_editor_variants` 读取或写出变体配置。构建、翻译任务通过 `renpy_sdk_start` 提交，用 `image_job` 查询状态，分别用 `renpy_sdk_builds` 和 `renpy_sdk_translations` 获取结果。
+
+CodeMirror 构建产物随仓库提供，启动 WebUI 时直接加载。修改编辑器引擎后，可在 `web/editor-build/` 运行 `npm ci --ignore-scripts` 和 `npm run build` 重新生成浏览器包及许可证清单。
 
 ## 项目路线图
 
@@ -39,7 +51,7 @@ MCP 用 `script_editor_open` 读取草稿或指定 `revision`。`script_preview`
 
 下游只接收已通过且选中本节点的上游版本。更新输入后，旧结果不会自动流入下游。每个版本记录所属项目、使用的上游版本和产物引用，可从资源目录追溯来源。
 
-在仓库根目录的 `pipeline-nodes.json` 注册节点。每个节点有稳定的 `id`、名称、输入与产物说明，通过 `panels` 指定工具面板，通过 `retry_control` 指定重试触发的操作。修改线路只需改目标节点的 `depends_on`。有意的回流用 `{"node":"train","feedback":true}` 表示。重启 Prisma 后，前端根据依赖生成节点、箭头和产物表，旧版项目的节点历史仍可读取。
+在仓库根目录的 `pipeline-nodes.json` 注册节点。每个节点有稳定的 `id`、名称、输入与产物说明，通过 `panels` 指定工具面板，通过 `retry_control` 指定重试触发的操作。左侧「路线图」下按注册顺序列出所有节点，包括规划中的节点和参考输入。修改线路只需改目标节点的 `depends_on`。有意的回流用 `{"node":"train","feedback":true}` 表示。重启 Prisma 后，前端根据依赖生成节点、箭头和产物表，旧版项目的节点历史仍可读取。
 
 MCP 可用 `pipeline_state` 查看拓扑和当前版本，`pipeline_inputs` 获取指定节点已通过的上游版本，`pipeline_reusable` 查找可复用产物。`pipeline_action` 与 WebUI 共用节点操作，支持 `retry` 和 `pass`。更新节点时传最近版本的 `id` 作为 `base`，通过时传入当前有效的上游版本 ID，避免把旧输入的结果误传给下游；通过后的版本自动传给所有直接下游。
 

@@ -8,13 +8,15 @@ import secrets
 import tempfile
 from urllib.parse import quote
 
-from image_toolkit import IMAGE_TYPES, ONLINE_MODELS, ONLINE_SIZES, SAMPLERS
+from image_toolkit import IMAGE_TYPES, ONLINE_SIZES, SAMPLERS
 from image_library import KINDS
 from lora_export import save_export
 from pipeline_workflow import NODES, REFERENCE_KINDS, PipelineWorkflow
 from prisma_workflow import StudioWorkflow, inspect, make_archive
+from provider_model_info import TEST_OPERATIONS
 from script_editor import ScriptEditor
 from script_story import inspect_story
+from renpy_sdk import RenpySDK
 
 
 VERSIONS = ('2025-11-25', '2025-06-18', '2025-03-26')
@@ -62,15 +64,53 @@ class PrismaMCP:
         self.workflow = StudioWorkflow(images.resources)
         self.pipeline = PipelineWorkflow(images.resources)
         self.script_editor = ScriptEditor(images.resources, self.pipeline)
+        self.renpy_sdk = RenpySDK(self.script_editor, self.pipeline, images.jobs)
         self.base_url = base_url
         self.exports = images.home / 'exports'
         self.tools = {}
         tool = self.register
         tool('scenario_draft', 'Turn raw script text into a Scenario JSON object with stable line IDs and original line references. For a project, use its global text LLM settings unless the Scenario task override is enabled.',
              self.workflow.draft, {'raw': TEXT, 'speakers': OBJECT, 'heading': TEXT, 'line_ids': BOOL,
-                                  'project_id': JOB, 'config': PROJECT_CONFIG}, ('raw',))
-        tool('llm_status', 'Read whether the server has a text-generation API key configured without revealing the secret.',
-             self.workflow.llm_status, {}, read_only=True)
+                                  'project_id': JOB, 'config': PROJECT_CONFIG,
+                                  'mode': enum('rules', 'openai-compatible'), 'parameters': OBJECT,
+                                  'run_id': TEXT,
+                                  'model_override': row({'provider_id': TEXT, 'model': TEXT}, ('provider_id', 'model'))}, ('raw',))
+        tool('llm_status', 'Read whether this device has a saved API key for the supplied API host without revealing the secret.',
+             self.workflow.llm_status, {'base_url': TEXT}, ('base_url',), read_only=True)
+        tool('llm_credential', 'Save, clear, or check a machine-local API key. The secret is stored outside project data and never returned.',
+             self.workflow.llm_credential, {'base_url': TEXT, 'action': enum('status', 'save', 'clear'), 'api_key': TEXT},
+             ('base_url', 'action'))
+        tool('llm_models', 'Fetch model IDs and metadata from an OpenAI-compatible API using credentials saved in the local Prisma database.',
+             self.workflow.llm_api, {'base_url': TEXT, 'action': enum('models')}, ('base_url',), read_only=True)
+        tool('llm_test', 'Test model connectivity with a short chat completion using credentials saved in the local Prisma database.',
+             self.workflow.llm_api, {'base_url': TEXT, 'model': TEXT, 'action': enum('test')},
+             ('base_url', 'model'))
+        tool('api_providers', 'List workspace API provider profiles without revealing credentials.',
+             self.workflow.providers.list, {}, read_only=True)
+        tool('api_provider_save', 'Create or update a workspace API provider profile and optional local credential.',
+             self.provider_save, {'id': TEXT, 'name': TEXT, 'protocol': enum('openai', 'anthropic'),
+                                  'kind': TEXT, 'base_url': TEXT, 'api_key': TEXT}, ('name', 'base_url'))
+        tool('api_provider_delete', 'Delete a workspace API provider profile.', self.provider_delete,
+             {'id': TEXT}, ('id',))
+        tool('api_provider_models', 'Fetch model IDs and metadata for a saved API provider.',
+             self.provider_models, {'id': TEXT}, ('id',), open_world=True)
+        tool('api_provider_test', 'Check a saved provider connection through its non-generation /models endpoint.',
+             self.workflow.providers.test, {'id': TEXT}, ('id',), read_only=True, open_world=True)
+        tool('api_provider_model_save', 'Declare a model manually or correct the use and metadata of a fetched model.',
+             self.provider_model_save, {'id': TEXT, 'model': TEXT, 'name': TEXT,
+                 'kind': enum('text', 'image', 'audio', ''), 'metadata': OBJECT, 'capabilities': OBJECT,
+                 'probe': enum('', *TEST_OPERATIONS), 'test_voice': TEXT}, ('id', 'model', 'kind'))
+        tool('api_provider_model_test', 'Send one small real request to a declared model and save the result. Model tests can use account quota.',
+             self.workflow.providers.test_model, {'id': TEXT, 'model': TEXT}, ('id', 'model'), open_world=True)
+        tool('api_model_defaults_save', 'Save workspace text, image and audio defaults. Each value is a provider_id/model object or null.',
+             self.workflow.providers.save_defaults, {'defaults': OBJECT}, ('defaults',))
+        tool('speech_generate', 'Generate Japanese dialogue with an OpenAI compatible speech model and register the audio as a project asset.',
+             self.workflow.speech, {'project_id': JOB, 'text': TEXT, 'voice': TEXT, 'speed': schema('number'),
+                                  'line_id': TEXT, 'run_id': TEXT, 'model_override': row({'provider_id': TEXT, 'model': TEXT}, ('provider_id', 'model'))},
+             ('project_id', 'text', 'voice'), open_world=True)
+        tool('generation_log', 'Read the latest Scenario or speech generation log, or find a specific run.',
+             self.workflow.generation_log, {'project_id': JOB, 'node': enum('scenario', 'voice-assets'),
+                                            'run_id': TEXT, 'include_response': BOOL}, ('node',), read_only=True)
         tool('scenario_inspect', 'Return normalized Scenario JSON and list scenes, speakers, and stable text item IDs.', inspect,
              {'scenario': SCENARIO}, ('scenario',), read_only=True)
         tool('scenario_save', 'Register edited source, Scenario and cues without changing their content.',
@@ -88,22 +128,65 @@ class PrismaMCP:
                                          'cue': OBJECT, 'replace': INT}, ('scenario', 'scene', 'index', 'cue'))
         tool('script_editor_open', 'Read the latest editable Ren’Py draft or a prior revision in this project.',
              self.script_editor.open, {'project_id': JOB, 'revision': TEXT}, ('project_id',), read_only=True)
-        tool('script_editor_save', 'Save an editable Ren’Py revision. Pass the last draft ID as base and the managed asset map from preview or insert.',
-             self.script_editor.save, {'project_id': JOB, 'base': TEXT, 'text': TEXT,
-                                       'managed_assets': schema('object', additionalProperties=TEXT)},
-             ('project_id', 'base', 'text'))
+        project_sources = {key: schema('object', additionalProperties=TEXT)
+                           for key in ('files', 'managed_assets', 'project_assets')}
+        tool('script_editor_save', 'Save a Ren’Py project revision. files maps game-relative paths to text, project_assets maps paths to asset IDs. Legacy text updates script.rpy.',
+             self.script_editor.save, {'project_id': JOB, 'base': TEXT, 'text': TEXT, **project_sources},
+             ('project_id', 'base'))
+        tool('script_editor_check', 'Check the project manifest, managed assets, entry label and duplicate labels across files.',
+             self.script_editor.check, {'project_id': JOB, **project_sources}, ('project_id', 'files'), read_only=True)
+        tool('script_editor_starter', 'Create a minimal runnable Ren’Py game manifest in memory.',
+             self.script_editor.starter, {}, read_only=True)
+        tool('script_editor_story', 'Inspect the scene list, characters and static branches across Ren’Py project files.',
+             self.script_editor.story, {'files': project_sources['files'], 'file': TEXT, 'scene': TEXT}, ('files',), read_only=True)
+        tool('script_editor_screens', 'Read or compile the visual screen model into portable Ren’Py screen source.',
+             self.script_editor.screens, {'text': TEXT, 'screens': OBJECT}, read_only=True)
+        tool('script_editor_variables', 'Read or compile default variables for visual widgets and Ren’Py source.',
+             self.script_editor.variables, {'text': TEXT, 'variables': OBJECT}, read_only=True)
+        tool('script_editor_history', 'List saved revisions in a project, newest first. Pass next as cursor to continue.',
+             self.script_editor.history, {'project_id': JOB, 'cursor': TEXT}, ('project_id',), read_only=True)
+        tool('script_editor_diff', 'Compare saved files and assets against a revision or its predecessor. Pass file to read its patch.',
+             self.script_editor.diff, {'project_id': JOB, 'revision': TEXT, 'base': TEXT, 'file': TEXT},
+             ('project_id', 'revision'), read_only=True)
+        tool('script_editor_merge', 'Three-way merge a draft against the current saved revision without writing. Resolve reported keys with draft or latest.',
+             self.script_editor.merge, {'project_id': JOB, 'base': TEXT, 'expected_head': TEXT,
+                                        'resolutions': schema('object', additionalProperties=enum('draft', 'latest')),
+                                        **project_sources}, ('project_id', 'base', 'files'), read_only=True)
+        tool('script_editor_variants', 'Read or serialize named Ren’Py release variants. Each variant may cut at a scene and exclude specified project paths.',
+             self.script_editor.variants, {'text': TEXT, 'variants': OBJECT, 'project_id': JOB, 'revision': TEXT}, read_only=True)
+        tool('renpy_sdk_status', 'Check the local Ren’Py SDK and available build targets or project signing configuration.',
+             self.renpy_sdk.status, {'project_id': JOB}, read_only=True)
+        tool('renpy_sdk_start', 'Run native lint, play, build, or translation generation for trusted Ren’Py source. Build takes package; translate takes language. Read status and logs with image_job.',
+             self.renpy_sdk.start, {'project_id': JOB, 'revision': TEXT, 'mode': enum('lint', 'run', 'build', 'translate'),
+                                   'package': enum('win', 'linux', 'mac', 'web'), 'language': TEXT, 'variant': TEXT, 'updates': BOOL},
+             ('project_id', 'revision', 'mode'))
+        tool('renpy_sdk_translations', 'Read translation source files from a completed SDK job for script_editor_save.',
+             self.renpy_sdk.translations, {'project_id': JOB, 'job_id': JOB}, ('project_id', 'job_id'), read_only=True)
+        tool('renpy_sdk_builds', 'List recent project builds and artifacts with their local download URLs.',
+             self.sdk_builds, {'project_id': JOB}, ('project_id',), read_only=True)
         tool('script_editor_asset', 'Return a portable path and a Ren’Py snippet for a current approved asset.',
              self.script_editor.prepare_asset, {'project_id': JOB, 'asset_id': TEXT,
                 'action': enum('path', 'background', 'portrait', 'music', 'sound', 'voice')},
              ('project_id', 'asset_id', 'action'), read_only=True)
+        tool('script_editor_localized_asset', 'Return the Ren’Py language-specific override path for an asset within this project.',
+             self.script_editor.localized_asset, {'project_id': JOB, 'asset_id': TEXT, 'path': TEXT, 'language': TEXT},
+             ('project_id', 'asset_id', 'path', 'language'), read_only=True)
         tool('script_story_inspect', 'Read the label outline, characters, and editable rows of one scene in a Ren’Py script.',
              inspect_story, {'text': TEXT, 'scene': TEXT}, ('text',), read_only=True)
-        tool('script_story_edit', 'Apply a scene or row edit to Ren’Py text, preserving source outside the edited row. Returns text and newly referenced assets for script_editor_save.',
+        tool('script_story_edit', 'Apply a scene or row edit to Ren’Py text, preserving source outside the edited row. Use files and file for cross-file targets.',
              self.script_editor.edit_story, {'text': TEXT, 'scene': TEXT, 'project_id': JOB, 'line': INT, 'row': OBJECT,
-                                             'operation': enum('add_scene', 'add_character', 'insert', 'replace', 'delete')},
-             ('text', 'scene', 'operation'))
+                                             'files': project_sources['files'], 'file': TEXT,
+                                             'operation': enum('add_scene', 'add_character', 'insert', 'replace', 'delete', 'move_up', 'move_down')},
+             ('scene', 'operation'))
         tool('image_catalog', 'List online readiness, local installation, reference sources, LoRAs, and recent jobs.',
              lambda data: images.catalog(data.get('project_id')), {'project_id': JOB}, read_only=True)
+        tool('image_api_credential', 'Save, clear, or check the OpenAI image API key in the local Prisma database; never returns the key.',
+             images.image_api_credential,
+             {'action': enum('status', 'save', 'clear'), 'api_key': TEXT}, ('action',))
+        tool('image_api_models', 'Fetch available image-generation model IDs and metadata from OpenAI /v1/models, then cache them locally.',
+             images.image_api_models, {}, read_only=True)
+        tool('image_api_test', 'Test OpenAI image API connectivity using the non-billable /v1/models endpoint.',
+             lambda _data: images.image_api_models({'action': 'test'}), {}, read_only=True)
         tool('library_list', 'Search the workspace catalog by category, label, ID, path, or recorded options. Returns paginated records.',
              images.library_list, {'kind': enum(*KINDS), 'query': TEXT, 'limit': INT, 'offset': INT,
                                    'project_id': JOB, 'shared': BOOL}, read_only=True)
@@ -174,7 +257,8 @@ class PrismaMCP:
                             'parent_lora': TEXT, 'project_id': JOB}, ('dataset', 'name'))
         tool('image_generate', 'Queue local inference or an online API call. Online sends the prompt and uses account quota. Locally, use base_model anima, sdxl, or sd1 to choose a base without a LoRA; use [""] for the selected base or two compatible LoRA IDs for matched seeds. Anima runs with Apple MLX and accepts er_sde or euler sampling.',
              images.generate, {'mode': enum('local', 'online'), 'prompt': TEXT, 'count': INT,
-                               'model': enum(*ONLINE_MODELS), 'size': enum(*ONLINE_SIZES),
+                               'size': enum(*ONLINE_SIZES),
+                               'model_override': row({'provider_id': TEXT, 'model': TEXT}, ('provider_id', 'model')),
                                'quality': enum('low', 'medium', 'high'), 'negative': TEXT,
                                'loras': schema('array', items=TEXT, minItems=1, maxItems=2),
                                'base_model': enum('sd1', 'sdxl', 'anima'), 'width': INT,
@@ -199,6 +283,26 @@ class PrismaMCP:
                            'project_title': TEXT, 'script_id': TEXT,
                            'asset_ids': schema('object', additionalProperties=TEXT), 'project_id': JOB})
 
+    def provider_save(self, data):
+        result = self.workflow.providers.save(data)
+        self.images.index_models()
+        return result
+
+    def provider_delete(self, data):
+        result = self.workflow.providers.delete(data)
+        self.images.index_models()
+        return result
+
+    def provider_models(self, data):
+        result = self.workflow.providers.models(data)
+        self.images.index_models()
+        return result
+
+    def provider_model_save(self, data):
+        result = self.workflow.providers.update_model(data)
+        self.images.index_models()
+        return result
+
     def register(self, name, description, handler, fields, required=(), *, read_only=False, destructive=False, open_world=False):
         self.tools[name] = (handler, dict(name=name, description=description, inputSchema=row(fields, required),
                                          annotations=dict(readOnlyHint=read_only, destructiveHint=destructive,
@@ -208,6 +312,15 @@ class PrismaMCP:
         saved = self.images.save_dataset(args)
         saved['download'] = f'{self.base_url}/api/images/dataset/{saved["id"]}.zip'
         return saved
+
+    def sdk_builds(self, args):
+        result = self.renpy_sdk.builds(args)
+        for item in result['items']:
+            if item['state'] != 'done':
+                continue
+            for index, package in enumerate(item['packages']):
+                package['url'] = f'{self.base_url}/api/script/sdk/files/{item["id"]}/{index}?project_id={args["project_id"]}'
+        return result
 
     def dataset_source(self, args):
         source = self.images.list_source(args['source'])
@@ -288,7 +401,8 @@ class PrismaMCP:
             stage = Path(temporary)
             if approved_script is not None and 'managed_assets' in approved_script:
                 archive = self.script_editor.make_archive(project, stage, approved_script)
-                links.extend(('uses_asset', 'asset', ident) for ident in set(approved_script['managed_assets'].values()))
+                assets = set(approved_script['managed_assets'].values()) | set(approved_script.get('project_assets', {}).values())
+                links.extend(('uses_asset', 'asset', ident) for ident in sorted(assets))
             else:
                 if approved_script is not None and args.get('scenario') is None:
                     args.update(scenario=settings['scenario'], cues=settings['cues'],

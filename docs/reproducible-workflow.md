@@ -12,7 +12,7 @@ python webui.py
 | MCP Streamable HTTP | `http://127.0.0.1:8765/mcp` |
 | MCP stdio | `python /absolute/path/to/Prisma/mcp_stdio.py` |
 
-MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 初始化协议。配置支持 HTTP 的 MCP 客户端时填入 `/mcp` 地址。只支持 stdio 的客户端可以用下面的配置示例，将脚本改成实际的绝对路径。自定义服务端口时，给两个命令传入相同的 `--port`。
+MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 初始化协议。配置支持 HTTP 的 MCP 客户端时填入 `/mcp` 地址。只支持 stdio 的客户端可以用下面的配置示例，将脚本改成实际的绝对路径。stdio 桥会从默认图像工作目录读取正在运行的服务地址，因此支持自定义端口；如服务使用其他工作目录，可传入 `--image-workspace`。重复启动 `webui.py` 时会显示已运行服务的 WebUI 和 MCP 地址并正常退出。
 
 ```json
 {
@@ -27,7 +27,7 @@ MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 
 
 ## 路径一 · 调用在线图像 API
 
-1. 在启动进程的 PowerShell 中设置 `OPENAI_API_KEY`，再启动 `python webui.py`。如果服务已经启动，需要让新进程读取环境变量。API key 由服务端读取，无需写入 MCP 客户端或提交到项目。
+1. 在「API Provider」选择兼容格式，填写 API 地址和 Key。使用 Fetch Models 同步 metadata，目录不可用时手动填入模型 ID 并指定用途。连接测试读取 `/models`。在下方设置默认图像模型，或在图像生成节点指定 Provider 中的模型。
 2. 在 WebUI 选择「在线模型」，或在 MCP 调用 `image_catalog` 确认 `online.ready`，然后调用 `image_generate`。在线模式会把 `prompt` 发送给 OpenAI，并按账号计费。这条路线无需下载底模和本地工具。
 3. 用 `image_job` 查询任务 ID，等 `state` 为 `done`。WebUI 可以直接预览，MCP 可以用 `image_artifact` 读取图片或获取下载地址。
 

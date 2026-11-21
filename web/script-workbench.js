@@ -137,6 +137,16 @@
   }
 
   get('preview').onclick = () => refresh(point?.id);
+  get('open-ide').onclick = () => {
+    if (!openProject) return;
+    if (preview && renderedInput === JSON.stringify(input())) {
+      document.dispatchEvent(new CustomEvent('prisma-script-handoff', {detail: {
+        project: openProject.id, text: preview.script, assets: preview.managed_assets,
+        line: point?.script_line, anchor: point && `# ${point.scene}/${point.index}`,
+      }}));
+    }
+    goWorkspace('script-ide-workspace');
+  };
   document.addEventListener('prisma-line-production', (event) => refresh(event.detail));
   get('point').onchange = () => selectPoint(Number(value('point')), true);
   get('action').onchange = () => updateForm();

@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 from image_library import KINDS
-from script_editor import require_start
+from script_editor import require_project_start
 
 
 SNAPSHOT_KINDS = {'source': 'source', 'scenario': 'scenario', 'cues': 'cues', 'assets': 'revision'}
@@ -220,7 +220,7 @@ class PipelineWorkflow:
             if record.get('project_id') not in (None, project):
                 raise ValueError('关联产物属于其他项目。')
             if node == 'script' and kind == 'script' and 'managed_assets' in record['metadata']:
-                require_start(record['metadata']['text'])
+                require_project_start(record['metadata'])
             result[kind, ident] = {'kind': kind, 'id': ident, 'label': record['label']}
         if capture:
             kind = SNAPSHOT_KINDS.get(NODES[node].get('snapshot'))

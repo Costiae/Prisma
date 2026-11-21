@@ -34,6 +34,26 @@ CREATE TABLE IF NOT EXISTS links (
     FOREIGN KEY (kind, id) REFERENCES records(kind, id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS links_target ON links(target_kind, target_id);
+CREATE TABLE IF NOT EXISTS local_secrets (
+    scope TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE TABLE IF NOT EXISTS model_cache (
+    provider TEXT PRIMARY KEY,
+    models TEXT NOT NULL,
+    updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE TABLE IF NOT EXISTS api_providers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    api_key TEXT NOT NULL DEFAULT '',
+    models TEXT NOT NULL DEFAULT '[]',
+    created TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
 """
 
 
@@ -55,7 +75,7 @@ class ImageLibrary:
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version == 0:
                 db.execute('PRAGMA journal_mode=WAL')
-            if version < 2:
+            if version < 9:
                 db.execute('BEGIN IMMEDIATE')
                 version = db.execute('PRAGMA user_version').fetchone()[0]
                 if version == 0:
@@ -66,11 +86,106 @@ class ImageLibrary:
                     db.execute('ALTER TABLE records ADD COLUMN project_id TEXT')
                     db.execute('CREATE INDEX records_project ON records(project_id, kind, updated DESC, id)')
                     self._backfill_projects(db)
-                    db.execute('PRAGMA user_version=2')
+                    version = 2
+                if version < 3:
+                    db.execute("""CREATE TABLE IF NOT EXISTS local_secrets (
+                        scope TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    )""")
+                    db.execute('PRAGMA user_version=3')
+                    version = 3
+                if version < 4:
+                    db.execute("""CREATE TABLE IF NOT EXISTS model_cache (
+                        provider TEXT PRIMARY KEY,
+                        models TEXT NOT NULL,
+                        updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    )""")
+                    db.execute('PRAGMA user_version=4')
+                    version = 4
+                if version < 5:
+                    db.execute("""CREATE TABLE IF NOT EXISTS api_providers (
+                        id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+                        base_url TEXT NOT NULL, api_key TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '[]',
+                        created TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    )""")
+                    db.execute('PRAGMA user_version=5')
+                    version = 5
+                if version < 6:
+                    db.execute("ALTER TABLE api_providers ADD COLUMN protocol TEXT NOT NULL DEFAULT 'openai'")
+                    db.execute("""INSERT OR IGNORE INTO api_providers (id,name,kind,base_url,api_key,models,protocol)
+                        SELECT 'openai','OpenAI','text,image,audio','https://api.openai.com/v1',
+                            coalesce((SELECT value FROM local_secrets WHERE scope='https://api.openai.com'), ''),
+                            coalesce((SELECT models FROM model_cache WHERE provider='openai-images'), '[]'), 'openai'""")
+                    db.execute("""CREATE TABLE api_model_defaults (
+                        kind TEXT PRIMARY KEY, provider_id TEXT NOT NULL, model_id TEXT NOT NULL,
+                        FOREIGN KEY (provider_id) REFERENCES api_providers(id) ON DELETE RESTRICT
+                    )""")
+                    db.execute('PRAGMA user_version=6')
+                    version = 6
+                if version < 7:
+                    db.execute("""CREATE TABLE api_model_tests (
+                        provider_id TEXT NOT NULL, model_id TEXT NOT NULL, started_at TEXT NOT NULL,
+                        result TEXT NOT NULL, PRIMARY KEY (provider_id, model_id),
+                        FOREIGN KEY (provider_id) REFERENCES api_providers(id) ON DELETE CASCADE
+                    )""")
+                    db.execute('PRAGMA user_version=7')
+                    version = 7
+                if version < 8:
+                    db.execute("""CREATE TABLE generation_runs (
+                        id TEXT PRIMARY KEY, project TEXT NOT NULL, node TEXT NOT NULL,
+                        state TEXT NOT NULL, events TEXT NOT NULL)""")
+                    db.execute('CREATE INDEX generation_runs_project_node ON generation_runs(project,node)')
+                    db.execute('PRAGMA user_version=8')
+                    version = 8
+                if version < 9:
+                    db.execute('ALTER TABLE generation_runs ADD COLUMN response_text TEXT')
+                    db.execute('PRAGMA user_version=9')
                 db.commit()
-            elif version != 2:
+            elif version != 9:
                 raise ValueError(f'此 Prisma 版本无法读取目录数据库版本 {version}。')
             yield db
+
+    def api_providers(self):
+        with self.connection() as db:
+            rows = db.execute('SELECT * FROM api_providers ORDER BY name COLLATE NOCASE, id').fetchall()
+        return [{**{key: row[key] for key in row.keys() if key not in ('api_key', 'models')},
+                 'models': json.loads(row['models']), 'configured': bool(row['api_key'])} for row in rows]
+
+    def api_provider(self, ident):
+        with self.connection() as db:
+            row = db.execute('SELECT * FROM api_providers WHERE id = ?', (ident,)).fetchone()
+        if row is None:
+            raise FileNotFoundError('API Provider 不存在。')
+        return dict(row, models=json.loads(row['models']), configured=bool(row['api_key']))
+
+    def get_local_secret(self, scope):
+        with self.connection() as db:
+            row = db.execute('SELECT value FROM local_secrets WHERE scope = ?', (scope,)).fetchone()
+        return row['value'] if row else ''
+
+    def set_local_secret(self, scope, value):
+        with self.connection() as db:
+            db.execute("""INSERT INTO local_secrets (scope, value) VALUES (?, ?)
+                ON CONFLICT(scope) DO UPDATE SET value=excluded.value,
+                updated=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')""", (scope, value))
+
+    def clear_local_secret(self, scope):
+        with self.connection() as db:
+            db.execute('DELETE FROM local_secrets WHERE scope = ?', (scope,))
+
+    def get_model_cache(self, provider):
+        with self.connection() as db:
+            row = db.execute('SELECT models FROM model_cache WHERE provider = ?', (provider,)).fetchone()
+        return json.loads(row['models']) if row else None
+
+    def set_model_cache(self, provider, models):
+        with self.connection() as db:
+            db.execute("""INSERT INTO model_cache (provider, models) VALUES (?, ?)
+                ON CONFLICT(provider) DO UPDATE SET models=excluded.models,
+                updated=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')""",
+                       (provider, json.dumps(models, ensure_ascii=False)))
 
     def location(self, path):
         path = path.absolute()

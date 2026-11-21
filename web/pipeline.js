@@ -562,11 +562,13 @@
     const payload = content ? {content} : {};
     const resource = pickedResource();
     if (resource) payload.references = [{kind: resource.kind, id: resource.id}];
+    else if (node === 'scenario' && live?.reference) payload.references = [live.reference];
     else if (live?.captureProject || (readySnapshot(node) && !inputsChanged)) payload.capture_project = true;
     else if (node === 'prompt' && field('image-prompt').value.trim()) {
       payload.output = {prompt: field('image-prompt').value, negative: field('image-negative').value};
-    } else if (node === 'online' && catalog.some((item) => item.id === `openai:${field('image-model').value}`)) {
-      payload.references = [{kind: 'model', id: `openai:${field('image-model').value}`}];
+    } else if (node === 'online') {
+      const ref = providerCatalog.defaults.image;
+      if (ref) payload.references = [{kind: 'model', id: `${ref.provider_id}:${ref.model}`}];
     } else if (live?.reference) payload.references = [live.reference];
     else if (live?.output) payload.output = live.output;
     else if (head(node)?.status === 'pending' && head(node).references.length) {
@@ -824,6 +826,7 @@
   });
   tools.addEventListener('input', () => { updateButtons(); updateActivity(); renderOutputs(); });
   tools.addEventListener('change', updateButtons);
+  document.addEventListener('prisma-provider-catalog', updateButtons);
   new MutationObserver(updateButtons).observe(tools, {attributes: true, attributeFilter: ['data-busy'], subtree: true});
   document.addEventListener('prisma-node-output', ({detail}) => {
     const old = outputs.get(detail.node);
@@ -873,6 +876,7 @@
     updateActivity();
     updateButtons();
   });
+  document.addEventListener('prisma-pipeline-refresh', refresh);
   document.addEventListener('prisma-project-change', () => {
     ++approvedRequest;
     approvedItems = [];

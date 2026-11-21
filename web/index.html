@@ -3,14 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="prisma-style-nonce" content="__PRISMA_STYLE_NONCE__">
   <title>Prisma · 视觉小说工作台</title>
   <link rel="stylesheet" href="/app.css">
   <script src="/app.js" defer></script>
+  <script src="/providers.js" defer></script>
   <script src="/pipeline-layout.js" defer></script>
   <script src="/pipeline.js" defer></script>
   <script src="/images.js" defer></script>
   <script src="/script-workbench.js" defer></script>
   <script src="/script-story.js" defer></script>
+  <script src="/editor-engine.js" defer></script>
+  <script src="/script-ide-workspace.js" defer></script>
   <script src="/script-ide.js" defer></script>
 </head>
 <body>
@@ -51,20 +55,23 @@
     </header>
     <aside class="workspace-sidebar" aria-label="工作区导航">
       <nav class="workspace-nav" aria-label="工作区">
-        <div class="nav-group">
-          <a href="#project-manager"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-library"></use></svg><span>项目库</span></a>
+        <div class="nav-group nav-primary">
+          <a id="nav-project-library" href="#project-manager"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-library"></use></svg><span>项目库</span></a>
+          <a id="nav-api-providers" href="#api-providers"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-settings"></use></svg><span>API Provider</span></a>
+          <button id="project-nav-toggle" class="nav-toggle" type="button" aria-expanded="false" aria-controls="project-nav">项目导航</button>
         </div>
-        <div id="project-nav" class="nav-group project-nav" role="group" aria-labelledby="nav-project-workspace" hidden>
-          <span class="nav-label" id="nav-project-workspace">制作</span>
-          <a href="#projects"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-route"></use></svg><span>项目总览</span></a>
-          <a href="#stage-scenario"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-document"></use></svg><span>剧本</span></a>
-          <a href="#stage-generation"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-image"></use></svg><span>图像生成</span></a>
-          <a href="#stage-train"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-layers"></use></svg><span>LoRA 训练</span></a>
-          <a href="#stage-assets"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder"></use></svg><span>项目素材</span></a>
+        <div id="project-nav" class="project-nav">
+          <a href="#script-ide-workspace"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-code"></use></svg><span>脚本 IDE</span></a>
+          <div id="route-nav" class="nav-branch">
+            <div class="nav-branch-heading">
+              <a id="nav-roadmap" href="#projects"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-route"></use></svg><span>路线图</span></a>
+              <button id="route-nav-toggle" class="nav-branch-toggle" type="button" aria-label="折叠路线图节点" aria-expanded="true" aria-controls="route-nav-children"><svg viewBox="0 0 24 24" class="ui-icon" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg></button>
+            </div>
+            <div id="route-nav-children" class="nav-group route-nav-children" role="group" aria-labelledby="nav-roadmap">
+              <!-- PRISMA_ROADMAP_LINKS -->
+            </div>
+          </div>
           <a href="#approved-assets"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-write"></use></svg><span>已通过资产</span></a>
-          <a href="#stage-cues"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-code"></use></svg><span>演出绑定</span></a>
-          <a href="#stage-script"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-document"></use></svg><span>脚本 IDE</span></a>
-          <a href="#stage-export"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-export"></use></svg><span>工程导出</span></a>
           <a href="#project-config"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-settings"></use></svg><span>项目配置</span></a>
         </div>
       </nav>
@@ -190,6 +197,7 @@
         </div>
       </section>
       <section id="project-manager" class="workspace-view" data-workspace-view="项目库" aria-label="项目管理" hidden>
+        <p id="project-navigation-hint" class="project-navigation-hint" role="status" hidden></p>
         <div class="project-panel-heading">
           <div class="project-library-title"><h2 id="project-library-title">全部项目</h2><span id="project-count" class="project-count">读取中</span></div>
           <div class="studio-actions">
@@ -226,12 +234,22 @@
       </section>
       <section id="project-config" class="workspace-view" data-project-view data-workspace-view="项目配置" hidden>
         <nav class="config-nav" aria-label="项目配置分组">
-          <a href="#settings-identity"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-display"></use></svg><span>项目与输出</span></a>
-          <a href="#settings-llm"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-message"></use></svg><span>文本模型</span></a>
-          <a href="#settings-generation"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-image"></use></svg><span>图像模型</span></a>
-          <a href="#settings-training"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-layers"></use></svg><span>训练模型</span></a>
-          <a href="#settings-prompts"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-spark"></use></svg><span>提示词</span></a>
-          <a href="#settings-management"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-settings"></use></svg><span>管理</span></a>
+          <div class="config-nav-group" role="group" aria-label="项目默认值">
+            <span class="config-nav-label">项目默认值</span>
+            <div class="config-nav-links">
+              <a href="#settings-identity"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-display"></use></svg><span>输出</span></a>
+              <a href="#settings-llm"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-message"></use></svg><span>文本模型</span></a>
+              <a href="#settings-generation"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-image"></use></svg><span>图像生成</span></a>
+              <a href="#settings-training"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-layers"></use></svg><span>训练</span></a>
+              <a href="#settings-prompts"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-spark"></use></svg><span>提示词</span></a>
+            </div>
+          </div>
+          <div class="config-nav-group" role="group" aria-label="项目管理">
+            <span class="config-nav-label">项目管理</span>
+            <div class="config-nav-links">
+              <a href="#settings-management"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-settings"></use></svg><span>维护</span></a>
+            </div>
+          </div>
         </nav>
         <div class="work-grid project-config-grid">
           <section class="panel" id="settings-identity">
@@ -249,26 +267,21 @@
             <p id="project-config-error" class="hint error-text" role="alert" hidden></p>
           </section>
           <section class="panel project-config-wide" id="settings-llm">
-            <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-message"></use></svg>文本模型 · 项目全局 LLM</h2>
-            <p class="hint">这是项目的文本模型默认配置。所有 LLM 调用默认继承此处设置；只有启用任务级 Override 才会单独使用另一套配置。规则解析不调用模型。API 密钥由服务端环境变量读取，不存入项目。</p>
+            <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-message"></use></svg>文本模型 · 项目默认值</h2>
+            <p class="hint">这是项目的文本模型默认配置。所有 LLM 调用默认继承此处设置；只有启用任务级 Override 才会单独使用另一套配置。Provider 档案和凭据在工作区的「API Provider」管理。</p>
             <div class="studio-grid project-config-fields">
-              <label>处理方式<select id="config-llm-mode"><option value="rules">规则解析（本地）</option><option value="openai-compatible">OpenAI 兼容 LLM</option></select></label>
-              <label>API 地址<input id="config-llm-url" type="url" maxlength="512" value="https://api.openai.com/v1" placeholder="https://api.openai.com/v1"></label>
-              <label>模型名称<input id="config-llm-model" maxlength="160" value="gpt-4o-mini" placeholder="gpt-4o-mini"></label>
+              <label>处理方式<select id="config-llm-mode"><option value="rules">规则解析（本地）</option><option value="openai-compatible">调用 API 模型</option></select></label>
               <label>Temperature<input id="config-llm-temperature" type="number" min="0" max="2" step="0.05" value="0.2"></label>
               <label>最大输出 Token<input id="config-llm-tokens" type="number" min="128" max="32768" step="128" value="4096"></label>
               <label>请求超时（秒）<input id="config-llm-timeout" type="number" min="30" max="600" step="10" value="180"></label>
             </div>
             <label class="studio-field project-config-wide-field">系统提示词<textarea id="config-llm-system" maxlength="6000">Convert the supplied novel text into Prisma Scenario JSON version 1. Return only one JSON object with version and chapters. Each chapter has id, title, scenes; each scene has id and lines; each line has text, speaker (string or null), and source {"kind":"raw","line":N} when traceable to an input line. Preserve the original language, wording, chapter and scene order. Do not summarize, rewrite, invent, omit, or merge distinct utterances. Use the supplied speaker map for quoted dialogue; use speaker "？" for unmapped quoted dialogue and null for narration. Keep valid sequential chapter IDs and scene IDs such as 1 and 1:1. Optional line fields are viewpoint and direction. Do not output Markdown fences.</textarea></label>
-            <p id="config-llm-key-state" class="project-config-key-state" role="status">正在读取服务端密钥状态…</p>
             <details id="config-llm-scenario-override" class="llm-override">
               <summary>Scenario 生成 · Override</summary>
               <p class="hint">关闭时实时继承上方的项目全局 LLM。启用后，Scenario 生成独立使用下方设置。</p>
               <label class="llm-override-toggle"><input id="config-llm-scenario-enabled" type="checkbox">为 Scenario 单独 Override 项目全局 LLM</label>
               <div id="config-llm-scenario-fields" class="studio-grid project-config-fields llm-override-fields" hidden>
-                <label>处理方式<select id="config-llm-scenario-mode"><option value="rules">规则解析（本地）</option><option value="openai-compatible">OpenAI 兼容 LLM</option></select></label>
-                <label>API 地址<input id="config-llm-scenario-url" type="url" maxlength="512" placeholder="https://api.openai.com/v1"></label>
-                <label>模型名称<input id="config-llm-scenario-model" maxlength="160" placeholder="gpt-4o-mini"></label>
+                <label>处理方式<select id="config-llm-scenario-mode"><option value="rules">规则解析（本地）</option><option value="openai-compatible">调用 API 模型</option></select></label>
                 <label>Temperature<input id="config-llm-scenario-temperature" type="number" min="0" max="2" step="0.05"></label>
                 <label>最大输出 Token<input id="config-llm-scenario-tokens" type="number" min="128" max="32768" step="128"></label>
                 <label>请求超时（秒）<input id="config-llm-scenario-timeout" type="number" min="30" max="600" step="10"></label>
@@ -278,8 +291,9 @@
           </section>
           <section class="panel project-config-wide" id="settings-generation">
             <h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-image"></use></svg>图像模型与生成默认值</h2>
+            <p class="hint">保存项目的图像参数。使用 Provider 时读取工作区的全局默认图像模型。</p>
             <div class="studio-grid project-config-fields">
-              <label>默认模式<select id="config-image-mode"><option value="local">本地模型</option><option value="online">在线模型</option></select></label>
+              <label>默认执行方式<select id="config-image-mode"><option value="local">本地模型</option><option value="online">Provider</option></select></label>
               <label>本地底模<select id="config-image-base"><option value="">自动选择已安装底模</option><option value="sd1">Anything V3 · SD 1.x</option><option value="sdxl">Animagine XL 4.0</option><option value="anima">Anima Base</option></select></label>
               <label>默认 LoRA<select id="config-image-lora"><option value="">底模</option></select></label>
               <label>对照 LoRA<select id="config-image-compare"><option value="none">关闭对照</option><option value="">底模</option></select></label>
@@ -290,7 +304,6 @@
               <label>CFG<input id="config-image-cfg" type="number" min="1" max="15" step="0.1" value="6.5"></label>
               <label>默认 Seed<input id="config-image-seed" type="number" min="0" max="2147483644" placeholder="留空则随机"></label>
               <label>候选张数<input id="config-image-count" type="number" min="1" max="4" value="1"></label>
-              <label>在线模型<select id="config-image-online-model"><option value="">使用服务默认模型</option></select></label>
               <label>在线尺寸<select id="config-image-online-size"><option value="1024x1536">1024 × 1536 · 竖图</option><option value="1536x1024">1536 × 1024 · 横图</option><option value="1024x1024">1024 × 1024 · 方图</option></select></label>
               <label>在线质量<select id="config-image-quality"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
             </div>
@@ -328,6 +341,103 @@
           </section>
         </div>
       </section>
+      <section id="api-providers" class="workspace-view" data-workspace-view="API Provider" hidden>
+        <div class="work-grid project-config-grid">
+          <section class="panel" id="settings-api" aria-labelledby="provider-list-title">
+            <p id="api-provider-message" class="hint" role="status">正在读取 Provider…</p>
+            <div class="provider-workbench">
+              <aside class="provider-rail" aria-labelledby="provider-list-title">
+                <div class="provider-rail-heading">
+                  <h2 id="provider-list-title">服务商</h2>
+                  <button id="api-provider-add" type="button">添加</button>
+                </div>
+                <div id="api-provider-list" class="api-provider-list" role="group" aria-label="选择服务商"></div>
+                <a class="provider-defaults-link" href="#api-defaults">全局默认模型</a>
+              </aside>
+              <div id="api-provider-workspace" class="provider-workspace" hidden>
+                <header class="provider-connection">
+                  <div class="provider-panel-header">
+                    <div><h2 id="api-provider-active-name"></h2><p id="api-provider-active-url" class="provider-address"></p></div>
+                    <button id="api-provider-edit" type="button">连接设置</button>
+                  </div>
+                  <div class="provider-connection-actions">
+                    <button id="api-provider-test-connection" type="button">测试连接</button>
+                    <p id="api-provider-connection-state" role="status"></p>
+                  </div>
+                </header>
+                <section class="provider-catalog" aria-labelledby="api-model-list-title">
+                  <div class="provider-panel-header">
+                    <div><h3 id="api-model-list-title">模型目录</h3><p id="api-model-count" class="hint"></p></div>
+                    <div class="provider-connection-actions">
+                      <button id="api-provider-fetch" class="primary" type="button">Fetch Models</button>
+                      <button id="api-model-add" type="button">手动添加</button>
+                    </div>
+                  </div>
+                  <p id="api-provider-fetch-state" class="hint" role="status" hidden></p>
+                  <p class="hint provider-model-test-note">发送测试会调用对应模型，可能消耗额度。</p>
+                  <div id="api-model-filters" class="provider-filters" hidden>
+                    <label class="sr-only" for="api-model-query">搜索模型</label>
+                    <input type="search" id="api-model-query" maxlength="160" placeholder="搜索模型名称或 ID">
+                    <label class="sr-only" for="api-model-filter">模型用途</label>
+                    <select id="api-model-filter"><option value="all">所有用途</option><option value="text">文本</option><option value="image">图像</option><option value="audio">音频／语音</option><option value="">其他</option></select>
+                  </div>
+                  <div id="api-model-list"></div>
+                  <p id="api-model-test-live" class="sr-only" role="status"></p>
+                </section>
+              </div>
+            </div>
+            <dialog id="api-provider-dialog" class="api-provider-dialog" aria-labelledby="api-provider-title">
+              <form id="api-provider-form" method="dialog">
+                <h3 id="api-provider-title">添加 API Provider</h3>
+                <label>名称<input id="api-provider-name" maxlength="100" required placeholder="例如：本地 vLLM"></label>
+                <label>API 格式<select id="api-provider-protocol"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 兼容</option></select></label>
+                <label>API 地址<input id="api-provider-url" type="url" maxlength="512" required placeholder="https://api.example.com/v1"></label>
+                <label>API Key<input id="api-provider-key" type="password" maxlength="4096" autocomplete="new-password"></label>
+                <label id="api-provider-clear-row" class="provider-checkbox" hidden><input id="api-provider-clear" type="checkbox">清除已保存的 Key</label>
+                <p class="hint">API 地址或格式更改时，请重新填写 Key。</p>
+                <p id="api-provider-edit-error" class="error-text" role="alert" hidden></p>
+                <div class="studio-actions"><button id="api-provider-delete" class="provider-delete" type="button" hidden>删除 Provider</button><button id="api-provider-cancel" type="button">取消</button><button class="primary" type="submit">保存 Provider</button></div>
+              </form>
+            </dialog>
+            <dialog id="api-model-dialog" class="api-provider-dialog" aria-labelledby="api-model-title">
+              <form id="api-model-form" method="dialog">
+                <h3 id="api-model-title">手动声明模型</h3>
+                <p id="api-model-provider" class="hint"></p>
+                <label>模型 ID<input id="api-model-id" maxlength="160" required placeholder="由 API 服务商提供"></label>
+                <label>显示名称（可选）<input id="api-model-name" maxlength="160"></label>
+                <label>工作流用途<select id="api-model-kind"><option value="text">文本</option><option value="image">图像</option><option value="audio">音频／语音</option><option value="">其他</option></select></label>
+                <fieldset class="provider-capability-fields">
+                  <legend>模型能力</legend>
+                  <div id="api-model-capabilities" class="studio-grid"></div>
+                </fieldset>
+                <div class="studio-grid model-test-fields">
+                  <label>测试接口<select id="api-model-probe"></select></label>
+                  <label id="api-model-test-voice-field" hidden>测试音色<input id="api-model-test-voice" maxlength="100" placeholder="默认 alloy"></label>
+                </div>
+                <details class="provider-model-raw">
+                  <summary>API metadata（JSON）</summary>
+                  <label class="sr-only" for="api-model-metadata">模型 metadata</label>
+                  <textarea id="api-model-metadata" class="code" rows="6" maxlength="32000" placeholder="{}"></textarea>
+                </details>
+                <p id="api-model-error" class="error-text" role="alert" hidden></p>
+                <div class="studio-actions"><button id="api-model-cancel" type="button">取消</button><button class="primary" type="submit">保存模型</button></div>
+              </form>
+            </dialog>
+          </section>
+          <section class="panel" id="api-defaults" aria-labelledby="api-defaults-title">
+            <h2 id="api-defaults-title">全局默认模型</h2>
+            <p class="hint">节点选择 Provider 后，自动使用这里对应的模型。</p>
+            <form id="api-defaults-form">
+              <div class="studio-grid provider-defaults-grid">
+                <label>文本<select id="api-default-text"><option value="">未设置</option></select></label>
+                <label>图像<select id="api-default-image"><option value="">未设置</option></select></label>
+                <label>音频／语音<select id="api-default-audio"><option value="">未设置</option></select></label>
+              </div>
+              <div class="studio-actions"><button class="primary" type="submit" disabled>保存默认模型</button><p id="api-defaults-status" class="hint" role="status"></p></div>
+            </form>
+          </section>
+        </div>
+      </section>
       <section id="script-editor" class="workspace-view" data-project-view data-workspace-view="剧本与 Scenario" hidden>
         <div class="work-grid script-sources"><section id="scenario-panel" class="panel" aria-labelledby="scenario-title">
         <div class="panel-head">
@@ -353,11 +463,27 @@
         <textarea aria-label="原文" id="raw" spellcheck="false" placeholder="粘贴小说文本，或导入 UTF-8 文件。"></textarea>
         <p class="hint raw-append-hint">追加会保留已有原文并自动写入历史；已有 Scenario 不会自动改变。</p>
         <div id="scenario-draft-controls">
+        <label class="studio-field">执行方式<select id="scenario-run-mode"><option value="rules">本地规则解析</option><option value="openai-compatible">Provider</option></select></label>
+        <fieldset id="scenario-run-parameters" class="studio-grid" hidden disabled>
+          <legend class="sr-only">当前试跑参数</legend>
+          <label class="studio-wide">模型<select id="scenario-run-model"><option value="">工作区默认</option></select></label>
+          <label>Temperature<input id="scenario-run-temperature" type="number" min="0" max="2" step="0.05"></label>
+          <label>最大输出 Token<input id="scenario-run-tokens" type="number" min="128" max="32768"></label>
+          <label>请求超时（秒）<input id="scenario-run-timeout" type="number" min="30" max="600"></label>
+          <label class="studio-wide">系统提示词<textarea id="scenario-run-system" maxlength="6000"></textarea></label>
+        </fieldset>
         <div class="panel-foot">
           <label for="heading">起始章节</label>
           <input id="heading" type="text" placeholder="# 序章（可选）">
           <button id="draft" class="primary" type="button"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-spark"></use></svg>生成 Scenario</button>
         </div>
+        <section id="scenario-request-log" class="generation-request-log" aria-label="Scenario 生成日志">
+          <div><strong>生成日志</strong><span role="status">暂无运行记录</span></div><ol></ol>
+          <details id="scenario-response-preview" hidden>
+            <summary>查看失败的模型响应</summary>
+            <pre></pre>
+          </details>
+        </section>
         <details>
           <summary>说话人映射</summary>
           <label for="speakers">按原文行号填写 JSON，未指定的对白标为「？：」。</label>
@@ -412,6 +538,27 @@
       </section>
 
       <section id="assets" class="workspace-view" data-project-view data-workspace-view="项目素材" hidden>
+        <div hidden>
+        <section id="voice-panel" class="panel" aria-labelledby="voice-title">
+          <h2 id="voice-title">日语台词配音</h2>
+          <label class="studio-field">执行方式<select id="voice-mode"><option value="provider">Provider</option><option value="local">本地素材</option></select></label>
+          <div id="voice-local" class="studio-actions" hidden><button id="voice-import" type="button">导入本地配音</button></div>
+          <form id="voice-form">
+            <div class="studio-grid">
+              <label class="studio-wide">模型<select id="voice-node-model"><option value="">工作区默认</option></select></label>
+              <label class="studio-wide">日语台词<textarea id="voice-text" lang="ja" maxlength="4096" rows="3" required></textarea></label>
+              <label>台词 ID（可选）<input id="voice-line" maxlength="160"></label>
+              <label>声音名称<input id="voice-name" maxlength="100" placeholder="按 Provider 填写" required></label>
+              <label>语速<input id="voice-speed" type="number" min="0.25" max="4" step="0.05" value="1" required></label>
+            </div>
+            <div class="studio-actions"><button class="primary" type="submit">生成配音</button><p id="voice-status" class="hint" role="status"></p></div>
+          </form>
+          <audio id="voice-preview" controls hidden></audio>
+          <section id="voice-request-log" class="generation-request-log" aria-label="配音生成日志">
+            <div><strong>生成日志</strong><span role="status">暂无运行记录</span></div><ol></ol>
+          </section>
+        </section>
+        </div>
         <section class="panel" id="asset-panel">
           <div class="panel-head"><h2><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-folder"></use></svg>已加入项目的素材</h2><label class="file-button">添加素材<input id="files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.ogg,.opus,.mp3,.wav,.flac,.ttf,.otf,.ttc" aria-label="添加素材文件"></label></div>
           <div class="work-grid asset-workspace">
@@ -449,69 +596,232 @@
         <section id="image-library-detail" class="image-card" aria-label="资源详情" hidden></section>
       </div>
       </section>
-      <section id="production" class="workspace-view" data-project-view data-workspace-view="演出与脚本" hidden>
+      <section id="script-ide-workspace" class="workspace-view" data-project-view data-workspace-view="脚本 IDE" hidden>
         <section class="panel script-ide" id="script-ide" aria-labelledby="ide-title">
-          <div class="panel-head">
-            <h2 id="ide-title">script.rpy</h2>
-            <button id="ide-generate" type="button">从 Scenario 生成</button>
-            <label class="file-button">导入 .rpy<input id="ide-import" type="file" accept=".rpy,text/plain" aria-label="导入 Ren’Py 脚本"></label>
-            <button id="ide-reload" type="button">读取最新</button>
-            <button id="ide-previous" type="button" disabled>载入上一版</button>
-            <button id="ide-save" class="primary" type="button" disabled>保存草稿</button>
-            <button id="ide-export" type="button">下载已通过工程</button>
-          </div>
-          <div class="ide-workspace">
+          <header class="ide-menubar">
+            <h2 id="ide-title">Ren’Py 工程</h2>
+            <details class="ide-file-menu" id="ide-file-menu">
+              <summary>工程</summary>
+              <div class="ide-menu-content">
+                <button id="ide-starter" type="button">创建可运行工程</button>
+                <button id="ide-generate" type="button">从 Scenario 生成</button>
+                <label class="file-button">导入文件<input id="ide-import" type="file" multiple aria-label="导入工程文件"></label>
+                <label class="file-button">导入工程目录<input id="ide-import-folder" type="file" webkitdirectory multiple aria-label="导入工程目录"></label>
+                <button id="ide-reload" type="button">读取最新</button>
+                <button id="ide-merge" type="button" disabled>合并最新版本</button>
+                <button id="ide-previous" type="button" disabled>载入上一版</button>
+              </div>
+            </details>
+            <div class="ide-menubar-actions">
+              <a class="toolbar-link" id="ide-full-link" href="#script-ide-workspace">打开完整工作区</a>
+              <a class="toolbar-link" id="ide-stage-link" href="#stage-script">查看流程节点</a>
+              <button id="ide-play" type="button">剧情预览</button>
+              <button id="ide-save" class="primary" type="button" disabled>保存全部</button>
+            </div>
+          </header>
+          <nav class="ide-views" aria-label="脚本工作区">
+            <button type="button" data-ide-view="source" aria-controls="ide-view-source" aria-pressed="true">源码</button>
+            <button type="button" data-ide-view="story" aria-controls="ide-view-story" aria-pressed="false">剧情</button>
+            <button type="button" data-ide-view="flow" aria-controls="ide-view-flow" aria-pressed="false">分支</button>
+            <button type="button" data-ide-view="screens" aria-controls="ide-view-screens" aria-pressed="false">界面</button>
+            <button type="button" data-ide-view="localization" aria-controls="ide-view-localization" aria-pressed="false">本地化</button>
+            <button type="button" data-ide-view="history" aria-controls="ide-view-history" aria-pressed="false">版本</button>
+            <button type="button" data-ide-view="release" aria-controls="ide-view-release" aria-pressed="false">发布</button>
+          </nav>
+          <p id="ide-message" class="ide-message" role="status" hidden></p>
+          <div id="ide-view-source" class="ide-workspace">
+            <aside class="ide-explorer" aria-labelledby="ide-files-title">
+              <div class="ide-tools">
+                <h3 id="ide-files-title">game/</h3>
+                <button id="ide-new" type="button">新建文件</button>
+              </div>
+              <div id="ide-tree" class="ide-tree" aria-label="工程文件"></div>
+              <details id="ide-search-tools" class="ide-search">
+                <summary>工程内搜索</summary>
+                <form id="ide-search-form"><label class="sr-only" for="ide-search">搜索源码</label><input id="ide-search" type="search" placeholder="在全部文件中查找" required><button type="submit">搜索</button></form>
+                <p id="ide-search-status" class="hint" role="status"></p>
+                <ul id="ide-results" class="ide-links"></ul>
+              </details>
+            </aside>
             <div class="ide-source">
-              <div class="story-modes" role="group" aria-label="脚本编辑视图">
-                <button id="ide-story-mode" type="button" aria-pressed="true">剧情</button>
-                <button id="ide-source-mode" type="button" aria-pressed="false">源码</button>
+              <div id="ide-tabs" class="ide-tabs" aria-label="打开的文件"></div>
+              <div id="ide-file-tools" class="ide-tools ide-file-tools" hidden>
+                <strong id="ide-current-file">未打开文件</strong>
+                <button id="ide-find" type="button">查找 / 替换</button>
+                <button id="ide-rename" type="button">移动 / 重命名</button>
+                <button id="ide-delete" type="button">删除</button>
               </div>
-              <section id="ide-story" aria-label="剧情编辑">
-                <div class="story-toolbar">
-                  <label>场景<select id="story-scene"></select></label>
-                  <form id="story-new-scene"><label>新场景标签<input id="story-new-name" placeholder="如 ending" autocomplete="off"></label><button type="submit">新建场景</button></form>
-                  <button id="story-play" type="button" disabled>试玩本场</button>
+              <div id="ide-empty" class="ide-empty">
+                <h3 id="ide-empty-title">打开 Ren’Py 工程</h3>
+                <p id="ide-empty-detail">从项目剧本生成起稿，或导入已有工程。</p>
+                <div id="ide-empty-actions" class="ide-tools">
+                  <button type="button" class="primary" data-ide-empty="generate">从 Scenario 生成</button>
+                  <button type="button" data-ide-empty="starter">创建可运行工程</button>
+                  <button type="button" data-ide-empty="import-folder">导入工程目录</button>
                 </div>
-                <details class="story-characters"><summary>角色</summary><form id="story-new-character" class="story-toolbar"><label>标识<input id="story-character-id" placeholder="如 lin" required></label><label>显示名<input id="story-character-name" required></label><button type="submit">添加角色</button></form></details>
-                <p id="story-status" class="hint" role="status"></p>
-                <ol id="story-rows" class="story-rows" aria-label="剧情行"></ol>
-                <div class="story-toolbar story-add">
-                  <label>剧情命令<select id="story-command"><option value="dialogue">台词或旁白</option><option value="menu">分支选项</option><option value="jump">跳转场景</option><option value="return">结束剧情</option><option value="stop">停止音乐</option></select></label>
-                  <button id="story-add" type="button" disabled>添加剧情行</button>
-                  <span id="story-insertion" class="hint"></span>
-                </div>
-                <div id="story-form"></div>
-              </section>
-              <div id="ide-source-editor" hidden>
-              <div class="ide-navigation">
-                <label>场景标签<select id="ide-label"><option value="">跳转到 label</option></select></label>
-                <form id="ide-find-form"><label>查找<input id="ide-find" type="search" autocomplete="off"></label><button type="submit">下一个</button></form>
               </div>
-              <label class="sr-only" for="ide-code">Ren’Py 脚本源码</label>
-              <textarea id="ide-code" rows="22" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="从 Scenario 生成，或直接编写 Ren’Py 源码。"></textarea>
-              </div>
-              <div class="ide-status"><span id="ide-position">行 1，列 1</span><span id="ide-version"></span><span id="ide-message" role="status"></span></div>
+              <div id="ide-code" hidden></div>
+              <div class="ide-status"><span id="ide-position"></span><span id="ide-version"></span></div>
             </div>
             <aside class="ide-assets" aria-labelledby="ide-assets-title">
-              <h3 id="ide-assets-title">已通过资产</h3>
+              <label>当前文件大纲<select id="ide-label"><option value="">跳转到符号</option></select></label>
+              <h3 id="ide-assets-title">素材</h3>
               <label>素材<select id="ide-asset"><option value="">选择素材</option></select></label>
               <div id="ide-media" class="script-media"></div>
               <label>插入内容<select id="ide-action"><option value="path">文件路径</option></select></label>
-              <button id="ide-insert" type="button" disabled>插入剧情行</button>
+              <button id="ide-insert" type="button" disabled>插入到光标</button>
               <p id="ide-assets-status" class="hint" role="status"></p>
               <a href="#approved-assets">管理已通过资产</a>
             </aside>
           </div>
+          <section id="ide-view-story" class="ide-mode ide-story" aria-label="剧情编辑" hidden>
+            <aside class="ide-mode-rail">
+              <div class="ide-tools"><h3>场景</h3><button id="ide-scene-add" type="button">新建场景</button></div>
+              <div id="ide-scene-list" class="ide-scene-list"></div>
+              <div class="ide-tools"><h3>角色</h3><button id="ide-character-add" type="button">新建角色</button></div>
+              <ul id="ide-character-list" class="ide-character-list"></ul>
+            </aside>
+            <section class="ide-mode-body" aria-labelledby="ide-scene-title">
+              <div class="ide-mode-heading">
+                <div><h3 id="ide-scene-title">场景</h3><p class="hint" id="ide-scene-path"></p></div>
+                <div class="ide-tools"><button id="ide-scene-source" type="button">打开源码</button><button id="ide-row-add" type="button">添加剧情行</button></div>
+              </div>
+              <p id="ide-story-status" class="hint" role="status"></p>
+              <ol id="ide-story-rows" class="ide-story-rows"></ol>
+            </section>
+          </section>
+          <section id="ide-view-flow" class="ide-mode ide-mode-body" aria-labelledby="ide-flow-title" hidden>
+            <div class="ide-mode-heading"><div><h3 id="ide-flow-title">剧情分支</h3><p id="ide-flow-status" class="hint" role="status"></p></div></div>
+            <ol id="ide-flow" class="ide-flow"></ol>
+          </section>
+          <section id="ide-view-screens" class="ide-mode ide-screens" aria-label="界面编辑" hidden>
+            <aside class="ide-mode-rail">
+              <div class="ide-tools"><h3>界面</h3><button type="button" id="ide-screen-add">新建界面</button></div>
+              <div id="ide-screen-list" class="ide-scene-list"></div>
+              <div class="ide-tools"><h3>变量</h3><button type="button" id="ide-variable-add">新建变量</button></div>
+              <div id="ide-variable-list" class="ide-scene-list"></div>
+            </aside>
+            <section class="ide-mode-body">
+              <div class="ide-mode-heading">
+                <div><h3 id="ide-screen-title">界面</h3><p id="ide-screen-status" class="hint" role="status"></p></div>
+                <div class="ide-tools"><button type="button" id="ide-screen-source">打开源码</button><button type="button" id="ide-widget-add">添加控件</button></div>
+              </div>
+              <div class="ide-screen-workspace">
+                <div id="ide-screen-canvas" class="ide-screen-canvas" aria-label="界面布局"></div>
+                <div class="ide-layer-inspector">
+                <div id="ide-widget-layers" class="ide-scene-list" aria-label="控件层叠顺序"></div>
+                <form id="ide-widget-form" class="ide-widget-form" hidden>
+                  <div class="ide-tools"><h3>控件</h3><button type="button" id="ide-widget-delete">删除控件</button></div>
+                  <label>类型<select id="ide-widget-type"><option value="text">文本</option><option value="variable">变量文本</option><option value="button">按钮</option><option value="image">图片</option><option value="panel">色块</option><option value="component">复用界面</option></select></label>
+                  <label>内容<input id="ide-widget-value" maxlength="240"></label>
+                  <div class="ide-widget-grid">
+                    <label>左侧 (%)<input id="ide-widget-x" type="number" min="0" max="99" required></label>
+                    <label>顶部 (%)<input id="ide-widget-y" type="number" min="0" max="99" required></label>
+                    <label>宽度 (%)<input id="ide-widget-w" type="number" min="1" max="100" required></label>
+                    <label>高度 (%)<input id="ide-widget-h" type="number" min="1" max="100" required></label>
+                  </div>
+                  <label id="ide-widget-action-row">按钮动作<select id="ide-widget-action"><option value="return">返回</option><option value="start">开始游戏</option><option value="jump">跳转到场景</option><option value="show">打开界面</option><option value="hide">关闭界面</option><option value="set">设置变量</option><option value="toggle">切换开关变量</option><option value="language">切换游戏语言</option><option value="save">存档页</option><option value="load">读档页</option><option value="preferences">设置页</option><option value="quit">退出游戏</option></select></label>
+                  <label id="ide-widget-target-row" hidden>目标<input id="ide-widget-target"></label>
+                  <label id="ide-widget-argument-row" hidden>设为<input id="ide-widget-argument" placeholder="例如 true、2 或文本"></label>
+                  <label>可见条件<input id="ide-widget-visible_when" placeholder="变量为真时显示，留空为始终显示"></label>
+                  <button class="primary" type="submit">应用到工程</button>
+                </form>
+                </div>
+              </div>
+            </section>
+          </section>
+          <section id="ide-view-history" class="ide-mode ide-history" aria-label="工程历史" hidden>
+            <aside class="ide-mode-rail">
+              <div class="ide-tools"><h3>保存记录</h3><button id="ide-history-refresh" type="button">刷新</button></div>
+              <div id="ide-history-list" class="ide-scene-list"></div>
+              <button id="ide-history-more" type="button" hidden>更早版本</button>
+            </aside>
+            <section class="ide-mode-body" aria-labelledby="ide-diff-title">
+              <div class="ide-mode-heading">
+                <div><h3 id="ide-diff-title">版本对比</h3><p class="hint" id="ide-diff-status" role="status"></p></div>
+                <button id="ide-history-restore" type="button" disabled>作为草稿打开</button>
+              </div>
+              <div id="ide-diff-files" class="ide-diff-files"></div>
+            </section>
+          </section>
+          <section id="ide-view-localization" class="ide-mode ide-mode-body ide-release" aria-label="本地化" hidden>
+            <section>
+              <div class="ide-mode-heading"><h3>Ren’Py 翻译</h3></div>
+              <form class="ide-tools ide-translation-form" id="ide-translation-form">
+                <label>语言标识<input id="ide-language" placeholder="例如 japanese" pattern="[a-z][a-z0-9_]{0,31}" required></label>
+                <button id="ide-translation-generate" type="submit" disabled>生成翻译模板</button>
+                <button id="ide-translation-import" type="button" hidden>载入草稿</button>
+              </form>
+              <p class="hint" id="ide-translation-status" role="status"></p>
+              <ul id="ide-languages" class="ide-links"></ul>
+            </section>
+            <section>
+              <div class="ide-mode-heading">
+                <div><h3>语言素材替换</h3><p id="ide-localized-status" class="hint">同一个工程路径可随当前游戏语言使用不同图片、音频或字体。</p></div>
+                <button type="button" id="ide-localized-add">添加语言素材</button>
+              </div>
+              <ul id="ide-localized-assets" class="ide-package-list"></ul>
+            </section>
+          </section>
+          <section id="ide-view-release" class="ide-mode ide-mode-body ide-release" aria-label="检查、试玩与发布" hidden>
+            <section>
+              <div class="ide-mode-heading"><h3>工程检查</h3><button id="ide-check" type="button">检查当前草稿</button></div>
+              <p id="ide-check-status" class="hint" role="status"></p>
+              <ul id="ide-issues" class="ide-links"></ul>
+            </section>
+            <section class="ide-sdk">
+              <div class="ide-mode-heading">
+                <div><h3>本机 Ren’Py</h3><p id="ide-sdk-status" class="hint" role="status"></p></div>
+                <div class="ide-tools"><button id="ide-sdk-lint" type="button" disabled>原生 Lint</button><button id="ide-sdk-run" type="button" disabled>实机运行</button><button id="ide-sdk-stop" type="button" hidden>停止任务</button></div>
+              </div>
+              <pre id="ide-sdk-log" hidden></pre>
+            </section>
+            <section>
+              <div class="ide-mode-heading"><div><h3>发布版本</h3><p id="ide-release-status" class="hint" role="status"></p></div>
+                <div class="ide-tools"><button id="ide-approve" type="button" disabled>通过已保存版本</button><button id="ide-export" type="button">下载工程 ZIP</button></div>
+              </div>
+              <form class="ide-tools ide-translation-form" id="ide-build-form">
+                <label>发行变体<select id="ide-build-variant"><option value="main">完整版本</option></select></label>
+                <label>发行平台<select id="ide-build-target"><option value="win">Windows</option><option value="linux">Linux</option><option value="mac">macOS</option></select></label>
+                <label class="ide-update-option" id="ide-update-option" hidden><input type="checkbox" id="ide-build-updates">同时生成签名更新</label>
+                <button id="ide-build-start" type="submit" disabled>构建发行包</button>
+              </form>
+              <ul id="ide-build-files" class="ide-links ide-package-list" aria-label="发行包"></ul>
+            </section>
+            <section>
+              <div class="ide-mode-heading"><div><h3>发行变体配置</h3><p id="ide-variant-status" class="hint" role="status"></p></div><button id="ide-variant-add" type="button">配置变体</button></div>
+              <div id="ide-variant-list" class="ide-scene-list"></div>
+            </section>
+          </section>
+          <dialog id="ide-edit-dialog" class="ide-file-dialog" aria-labelledby="ide-edit-title">
+            <form id="ide-edit-form">
+              <h3 id="ide-edit-title">编辑</h3>
+              <div id="ide-edit-fields"></div>
+              <p id="ide-edit-error" class="hint error-text" role="status" hidden></p>
+              <div class="ide-tools"><button id="ide-edit-cancel" type="button">取消</button><button class="primary" type="submit">应用</button></div>
+            </form>
+          </dialog>
+          <dialog id="ide-file-dialog" class="ide-file-dialog" aria-labelledby="ide-file-title">
+            <form id="ide-file-form">
+              <h3 id="ide-file-title">新建文件</h3>
+              <label>game/ 下的路径<input id="ide-file-path" placeholder="如 scenes/ending.rpy" required></label>
+              <p id="ide-file-error" class="hint error-text" role="status" hidden></p>
+              <div class="ide-tools"><button id="ide-file-cancel" type="button">取消</button><button class="primary" type="submit">确认</button></div>
+            </form>
+          </dialog>
           <dialog id="story-preview" class="story-preview" aria-labelledby="story-preview-title">
             <div class="story-preview-header"><h3 id="story-preview-title">剧情试玩</h3><form method="dialog"><button type="submit">关闭</button></form></div>
             <div class="story-preview-stage"><div id="story-preview-bg" class="story-preview-layer"></div><div id="story-preview-actor" class="story-preview-layer"></div><div id="story-preview-output" class="story-preview-output" aria-live="polite"></div></div>
             <audio id="story-preview-music" loop></audio><audio id="story-preview-sound"></audio><audio id="story-preview-voice"></audio>
           </dialog>
         </section>
+      </section>
+      <section id="production" class="workspace-view" data-project-view data-workspace-view="演出与脚本" hidden>
         <section class="panel" id="script-workbench" aria-labelledby="script-title">
       <div class="panel-head">
-        <h2 id="script-title"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-code"></use></svg>Ren’Py 脚本工作台</h2>
+        <h2 id="script-title"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-code"></use></svg>Ren’Py 演出预览</h2>
         <button id="script-preview" type="button"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-play"></use></svg>生成脚本预览</button>
+        <button id="script-open-ide" type="button">在脚本 IDE 中编辑</button>
       </div>
       <p id="script-status" class="hint" aria-live="polite">生成预览后，点选代码中的台词，再从右侧插入项目素材。</p>
       <div class="script-layout">
@@ -568,6 +878,13 @@
         </section>
       </section>
       <section id="images" class="workspace-view" data-project-view data-workspace-view="图像与资产提示词" hidden>
+        <div hidden>
+          <section class="panel" id="online-default-panel">
+            <h2>Provider 图像模型</h2>
+            <p id="online-default-model" class="hint"></p>
+            <a href="#api-defaults">打开全局默认模型设置</a>
+          </section>
+        </div>
         <section class="panel image-studio" id="image-studio" aria-labelledby="image-title">
       <div class="panel-head">
         <h2 id="image-title"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-image"></use></svg>图像工作室</h2>
@@ -580,7 +897,7 @@
           <fieldset class="mode-switch">
             <legend class="sr-only">图像模型来源</legend>
             <label><input type="radio" name="image-mode" value="local" checked><span>本地模型</span></label>
-            <label><input type="radio" name="image-mode" value="online"><span>在线模型</span></label>
+            <label><input type="radio" name="image-mode" value="online"><span>Provider</span></label>
           </fieldset>
           <p id="image-mode-note" class="hint"></p>
           <div id="image-prompt-tools"><div class="studio-actions prompt-actions">
@@ -608,7 +925,7 @@
           </fieldset>
           <fieldset id="image-online" class="studio-grid" hidden disabled>
             <legend class="sr-only">在线图片参数</legend>
-            <label>OpenAI 模型<select id="image-model"></select></label>
+            <label class="studio-wide">模型<select id="image-node-model"><option value="">工作区默认</option></select></label>
             <label>分辨率<select id="image-online-size"><option value="1024x1536">1024 × 1536 · 竖图</option><option value="1536x1024">1536 × 1024 · 横图</option><option value="1024x1024">1024 × 1024 · 方图</option></select></label>
             <label>质量<select id="image-quality"><option value="low">低</option><option value="medium" selected>中</option><option value="high">高</option></select></label>
           </fieldset>

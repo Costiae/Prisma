@@ -32,7 +32,6 @@
       "scenario"
     ],
     "panels": [
-      "settings-llm",
       "scenario-draft-controls",
       "scenario-panel",
       "scene-panel"
@@ -65,17 +64,13 @@
     "id": "online",
     "title": "在线图像 API",
     "kind": "live",
-    "input": "配置服务端 API 密钥后，在图像生成选择在线模式。",
-    "output": "正向提示词、在线模型、尺寸、质量和张数。",
-    "workspace": "image-form",
+    "input": "在 API Provider 设置全局默认图像模型。",
+    "output": "记录确认时的 Provider 模型。新生成任务读取当时的全局默认值。",
+    "workspace": "online-default-panel",
     "depends_on": [],
     "work_label": "配置在线出图",
-    "reuse": [
-      "model"
-    ],
     "panels": [
-      "image-status",
-      "image-form"
+      "online-default-panel"
     ]
   },
   {
@@ -192,7 +187,7 @@
     "title": "脚本 IDE",
     "kind": "live",
     "input": "Scenario、演出绑定、实际引用的素材和可选字体。",
-    "output": "从 Scenario 生成可编辑的 Ren’Py 源码，插入已通过资产并保存脚本版本。通过后将该版本交给导出。",
+    "output": "编辑 Ren’Py 工程中的全部源文件和素材路径。保存整个工程版本，通过后可用于原生检查、试玩和导出。",
     "workspace": "script-ide",
     "depends_on": [
       "cues",
@@ -214,7 +209,7 @@
     "title": "Ren’Py 导出",
     "kind": "live",
     "input": "已通过的 Ren’Py 脚本版本与该版本引用的媒体和字体。",
-    "output": "renpy_export 将该版本的源码写入 game/script.rpy，复制相关素材，并登记导出记录。",
+    "output": "renpy_export 按工程版本的相对路径写入 game/ 下全部源文件和素材，并登记导出记录。",
     "workspace": "export-panel",
     "activity": "export",
     "depends_on": [
@@ -527,9 +522,9 @@
   {
     "id": "voice-assets",
     "title": "台词语音生成",
-    "kind": "plan",
-    "input": "已确认的台词、说话人和角色声音基准。",
-    "output": "拟按台词生成语音并维护素材与台词 ID 的关系。",
+    "kind": "live",
+    "input": "Provider 使用全局默认音频模型。本地路径可导入已经生成的配音素材。",
+    "output": "可试听的 MP3 项目素材，记录模型、声音、语速及填写的台词 ID。",
     "depends_on": [
       "voice-baseline"
     ],
@@ -540,6 +535,7 @@
     "reuse_workspace": "assets",
     "reuse_label": "导入已有素材",
     "panels": [
+      "voice-panel",
       "asset-panel"
     ]
   }
