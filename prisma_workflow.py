@@ -3,8 +3,6 @@
 import base64
 from dataclasses import asdict
 from hashlib import sha256
-from datetime import datetime, timezone
-from time import monotonic
 from uuid import uuid4
 import re
 import json
@@ -19,6 +17,7 @@ from prisma import (CHAPTER_ID, LINE_CUES, anchor_scenario, build_project, decod
                     render_script, scenario_document)
 from llm_credentials import LocalLlmCredentials
 from api_providers import ApiProviders, api_request
+from generation_log import RunJournal, measured_usage
 
 
 def require_text(data, key):
@@ -243,7 +242,7 @@ def normalize_model_scenario(document, event):
     return document
 
 
-def draft_scenario_llm(data, speakers, settings, event=lambda _message: None, save_failed_response=None):
+def draft_scenario_llm(data, speakers, settings, event=lambda _message: None, provider=None):
     raw = require_text(data, 'raw')
     heading = require_text(data, 'heading').strip()
     base_url = settings.get('base_url', 'https://api.openai.com/v1')
@@ -281,10 +280,15 @@ def draft_scenario_llm(data, speakers, settings, event=lambda _message: None, sa
             payload['max_completion_tokens'] = payload.pop('max_tokens')
             payload.pop('temperature')
     operation = 'messages' if protocol == 'anthropic' else 'chat/completions'
-    event(f'已开始请求 POST /{operation}，等待响应（超时 {timeout} 秒）。')
-    status, result = api_request({'base_url': base_url, 'api_key': key, 'protocol': protocol},
-                                 operation, payload, timeout=timeout, limit=8_000_000, response_meta=True)
-    event(f'收到 HTTP {status}，正在解析 Scenario JSON。')
+    if isinstance(event, RunJournal):
+        return event.request(provider, operation, payload, timeout=timeout, limit=8_000_000,
+                             context={'label': 'Scenario JSON'}, parse=lambda result: parse_draft_result(result, protocol, event))
+    result = api_request({'base_url': base_url, 'api_key': key, 'protocol': protocol},
+                         operation, payload, timeout=timeout, limit=8_000_000)
+    return parse_draft_result(result, protocol, event)
+
+
+def parse_draft_result(result, protocol, event):
     content = None
     try:
         if not isinstance(result, dict):
@@ -312,8 +316,6 @@ def draft_scenario_llm(data, speakers, settings, event=lambda _message: None, sa
         document = normalize_model_scenario(parsed_document, event)
         scenes = parse_scenario(document, allow_unresolved=True)
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as error:
-        if save_failed_response and isinstance(content, str) and content.strip():
-            save_failed_response(content)
         raise ValueError(f'LLM 输出不符合 Scenario v1 结构：{error}') from None
     scenario = scenario_document(scenes)
     pending = [line.source for scene in scenes for line in scene.lines
@@ -394,21 +396,43 @@ class StudioWorkflow:
 
     def generation_log(self, data):
         project, node = data.get('project_id') or '', data.get('node')
-        ident = data.get('run_id')
+        ident, request_id = data.get('run_id'), data.get('request_id')
         if node not in ('scenario', 'voice-assets'):
             raise ValueError('此节点没有请求日志。')
         include_response = data.get('include_response') is True
         with self.resources.library.connection() as db:
+            history = []
+            if data.get('include_history') is True:
+                history = [dict(entry) for entry in db.execute("""SELECT id,state,
+                    json_extract(events,'$[0].at') AS at FROM generation_runs
+                    WHERE project=? AND node=? ORDER BY rowid DESC LIMIT 20""", (project, node))]
             row = db.execute("""SELECT id,state,events,response_text IS NOT NULL AS has_response,
                 CASE WHEN ? AND state='failed' THEN response_text END AS response_text FROM generation_runs
                 WHERE project=? AND node=? AND (? IS NULL OR id=?) ORDER BY rowid DESC LIMIT 1""",
                              (include_response, project, node, ident, ident)).fetchone()
-        if not row:
-            return {'run': None}
-        payload = dict(row, events=json.loads(row['events']), has_response=bool(row['has_response']) and row['state']=='failed')
+            if not row:
+                return {'run': None, 'history': history}
+            items = db.execute("""SELECT snapshot,evidence IS NOT NULL AS has_evidence,
+                CASE WHEN ? AND (? IS NULL OR id=?) THEN evidence END AS evidence
+                FROM generation_requests WHERE run_id=? ORDER BY rowid""",
+                               (include_response, request_id, request_id, row['id'])).fetchall()
+        requests = []
+        evidence = row['response_text']
+        for item in items:
+            request = dict(json.loads(item['snapshot']), has_evidence=bool(item['has_evidence']))
+            if row['state'] == 'interrupted' and request['phase'] not in ('completed', 'failed', 'cached'):
+                request['phase'] = 'interrupted'
+            requests.append(request)
+            evidence = item['evidence'] if item['evidence'] is not None else evidence
+        has_response = (bool(row['has_response']) and row['state'] == 'failed'
+                        or any(item['has_evidence'] for item in items))
+        payload = dict(row, events=json.loads(row['events']), requests=requests, has_response=has_response,
+                       usage=measured_usage(requests))
         if not include_response:
             payload.pop('response_text')
-        return {'run': payload}
+        else:
+            payload['response_text'] = evidence
+        return {'run': payload, 'history': history}
 
     def _record_run(self, node, data, operation):
         project = data.get('project_id') or ''
@@ -417,7 +441,6 @@ class StudioWorkflow:
         ident = data.get('run_id') or uuid4().hex
         if not isinstance(ident, str) or not re.fullmatch('[a-f0-9]{32}', ident):
             raise ValueError('生成日志 ID 无效。')
-        events, started = [], monotonic()
         library = self.resources.library
         with library.connection() as db:
             cursor = db.execute("""INSERT OR IGNORE INTO generation_runs (id,project,node,state,events)
@@ -426,25 +449,12 @@ class StudioWorkflow:
             if not cursor.rowcount:
                 raise ValueError('此运行已提交，请查看日志。')
 
-        def event(message, state='running'):
-            events.append({'at': datetime.now(timezone.utc).isoformat(), 'elapsed': round(monotonic() - started, 2),
-                           'message': message})
-            with library.connection() as db:
-                db.execute('UPDATE generation_runs SET state=?,events=? WHERE id=?',
-                           (state, json.dumps(events, ensure_ascii=False), ident))
-
-        def save_failed_response(content):
-            preview = content[:16000].encode('utf-8', errors='replace').decode('utf-8')
-            if len(content) > 16000:
-                preview += '\n\n[仅保存前 16,000 个字符]'
-            with library.connection() as db:
-                db.execute('UPDATE generation_runs SET response_text=? WHERE id=?', (preview, ident))
-
+        event = RunJournal(library, ident)
         event('服务端已接收请求。')
         try:
-            result = operation(data, event, save_failed_response)
+            result = operation(data, event)
         except (ValueError, OSError) as error:
-            event(f'失败：{str(error)[:450]}', 'failed')
+            event(f'失败：{error}', 'failed')
             raise
         except Exception:
             event('失败：服务端内部错误。', 'failed')
@@ -452,7 +462,7 @@ class StudioWorkflow:
         event('已完成，产物已登记。', 'done')
         return dict(result, run_id=ident)
 
-    def _draft(self, data, event, save_failed_response):
+    def _draft(self, data, event):
         data = dict(data)
         project = data.get('project_id')
         if 'config' not in data and project:
@@ -475,7 +485,7 @@ class StudioWorkflow:
             settings.update(base_url=provider['base_url'], model=model, _api_key=provider['api_key'],
                             _protocol=provider['protocol'])
             event(f'使用 {provider["name"]} · {model}。')
-            scenario, pending = draft_scenario_llm(data, speakers, settings, event, save_failed_response)
+            scenario, pending = draft_scenario_llm(data, speakers, settings, event, provider)
             result = {'scenario': scenario, 'pending': pending, 'engine': provider['protocol'] + '-compatible'}
             model_ref = {'provider_id': provider['id'], 'model': model, 'protocol': provider['protocol']}
         else:
@@ -491,7 +501,7 @@ class StudioWorkflow:
         scenario_id = self.resources.document('scenario', result['scenario'], links, project=project, generation=generation)
         return dict(result, source_id=source_id, scenario_id=scenario_id, **({'model_ref': model_ref} if model_ref else {}))
 
-    def _speech(self, data, event, _save_failed_response):
+    def _speech(self, data, event):
         project = data.get('project_id')
         self.resources.project_record(project)
         text = require_text(data, 'text').strip()
@@ -503,13 +513,15 @@ class StudioWorkflow:
         if type(speed) not in (int, float) or not 0.25 <= speed <= 4:
             raise ValueError('语速须为 0.25–4。')
         provider, model = self.providers.resolve_node_model('audio', data.get('model_override'))
-        event(f'使用 {provider["name"]} · {model["id"]}，开始请求 POST /audio/speech（超时 120 秒）。')
-        status, blob = api_request(provider, 'audio/speech', {
+        def verify_mp3(blob):
+            if not (blob.startswith(b'ID3') or len(blob) > 2 and blob[0] == 255 and blob[1] & 224 == 224):
+                raise ValueError('音频 API 未返回 MP3。')
+            return blob
+
+        blob = event.request(provider, 'audio/speech', {
             'model': model['id'], 'input': text, 'voice': voice, 'speed': speed, 'response_format': 'mp3',
-        }, binary=True, limit=16_000_000, timeout=120, response_meta=True)
-        event(f'收到 HTTP {status} · {len(blob):,} 字节，正在检查音频。')
-        if not (blob.startswith(b'ID3') or len(blob) > 2 and blob[0] == 255 and blob[1] & 224 == 224):
-            raise ValueError('音频 API 未返回 MP3。')
+        }, binary=True, limit=16_000_000, timeout=120, parse=verify_mp3,
+           context={'label': '日语配音', 'line_id': line_id})
         params = {'provider_id': provider['id'], 'model': model['id'], 'voice': voice,
                   'speed': speed, 'language': 'ja', 'line_id': line_id, 'text': text}
         fingerprint = sha256(json.dumps(params, ensure_ascii=False).encode()).hexdigest()[:12]

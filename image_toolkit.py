@@ -16,6 +16,7 @@ import sys
 import tempfile
 import tarfile
 import threading
+from time import monotonic
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -483,7 +484,7 @@ class ImageToolkit:
         elif inputs.get('engine'):
             links.append(('uses_tool', 'tool', 'sd-cpp'))
         title = options.get('name') or options.get('prompt', '')[:100] or str(options.get('target') or job_kind)
-        summary = {key: job[key] for key in ('started', 'ended', 'phase', 'error', 'options') if key in job}
+        summary = {key: job[key] for key in ('started', 'ended', 'phase', 'error', 'options', 'provider_request') if key in job}
         summary.update(job_kind=job_kind, stamp=[stat.st_mtime_ns, stat.st_size, INDEX_PROJECTION])
         records = [dict(kind='job', id=ident, label=title, path=manifest, state=job['state'], project_id=project,
                         updated=updated, metadata=summary, links=links)]
@@ -1238,7 +1239,10 @@ class ImageToolkit:
                                    'tokenizers': revision['tokenizers'], 'mflux': runtime,
                                    'model_fetcher': self.identity(Path(__file__).with_name('anima_model_fetch.py'))})
 
-        return self.jobs.start('install', {'target': target, 'base_model': model_id}, work)
+        options = {'target': target, 'base_model': model_id}
+        if data.get('project_id'):
+            options['project_id'] = data['project_id']
+        return self.jobs.start('install', options, work)
 
     def install_mflux(self, job, stage):
         if not self.apple_silicon:
@@ -1528,6 +1532,9 @@ class ImageToolkit:
         prompt = string(data.get('prompt'), '提示词', 4000)
         count = number(data.get('count', 1), '生成张数', 1, 4, integer=True)
         options = dict(mode=mode, prompt=prompt, count=count)
+        if 'pipeline_inputs' in data:
+            options['pipeline_inputs'] = data['pipeline_inputs']
+            options['pipeline_node'] = data['pipeline_node']
         if original:
             options['replay_of'] = original['id']
 
@@ -1779,17 +1786,31 @@ class ImageToolkit:
 
     @staticmethod
     def online_generate(job, options, provider):
-        job.phase(f'正在请求 POST /images/generations · {provider["name"]} · {options["model"]}')
         model = options['model']
+        started = monotonic()
+        request = {'provider': provider['name'], 'model': model, 'operation': '/images/generations',
+                   'prompt_chars': len(options['prompt']), 'timeout': 300}
+
+        def progress(phase, **fields):
+            request.update(phase=phase, elapsed=round(monotonic() - started, 2), **fields)
+            job.update(provider_request=dict(request))
+
+        progress('connecting')
+        job.phase(f'正在请求 POST /images/generations · {provider["name"]} · {model} · 超时 300 秒')
         payload = dict(model=model, prompt=options['prompt'], n=options['count'], size=options['size'],
                        quality=options['quality'])
         if model.startswith('gpt-image'):
             payload['output_format'] = 'png'
         else:
             payload['response_format'] = 'b64_json'
-        status, result = api_request(provider, 'images/generations', payload, limit=96 * 1024 * 1024,
-                                     timeout=300, response_meta=True)
-        job.phase(f'收到 HTTP {status}，正在检查并保存图片')
+        try:
+            status, result = api_request(provider, 'images/generations', payload, limit=96 * 1024 * 1024,
+                                         timeout=300, response_meta=True, progress=progress)
+        except (ValueError, OSError) as error:
+            fields = {'status': error.status} if hasattr(error, 'status') else {}
+            progress('failed', **fields)
+            raise
+        job.phase(f'收到 HTTP {status}（{request["elapsed"]:.2f} 秒），正在检查并保存图片')
         try:
             content = result['data']
         except (KeyError, TypeError):

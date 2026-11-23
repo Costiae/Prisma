@@ -30,6 +30,9 @@
   let backgroundSelection = null;
   let otherPrompt = null;
   let appliedDefaults = '';
+  let localPluginEnabled = false;
+  let pipelineModel = null;
+  let backgroundInputsKey = '';
   const backgroundScene = field('background-generation-scene');
   const backgroundStatus = field('background-generation-status');
   const inBackgroundNode = () => !field('pipeline-stage').hidden
@@ -107,6 +110,7 @@
   }
 
   function controls() {
+    if (pipelineModel) setMode(pipelineModel.selected === 'models' ? 'local' : 'online');
     const local = mode() === 'local';
     const environment = catalog?.local;
     const working = Boolean(activeJob || submitting);
@@ -122,8 +126,8 @@
       && sd1?.available && sd1?.trainer_available;
     const chosenOnline = effectiveNodeModel('image-node-model');
     const onlineProvider = providerCatalog.providers.find((provider) => provider.id === chosenOnline?.provider_id);
-    const ready = local ? family === 'anima' ? animaReady : family === 'sdxl' ? sdxlReady
-      : sd1MpsReady || environment?.supported && environment.engine && environment.model : Boolean(onlineProvider);
+    const ready = local ? localPluginEnabled && (family === 'anima' ? animaReady : family === 'sdxl' ? sdxlReady
+      : sd1MpsReady || environment?.supported && environment.engine && environment.model) : Boolean(onlineProvider);
     const installModel = environment?.training_models?.find((model) => model.id === value('install-base'));
     const trainModel = environment?.training_models?.find((model) => model.id === value('train-base'));
     get('local').hidden = get('local').disabled = !local;
@@ -141,7 +145,7 @@
             : '新环境请展开本地工具箱，拉取推理组件或完整 LoRA 工具链。')
       : (onlineProvider ? `将通过 ${onlineProvider.name} 调用 ${chosenOnline.model}。`
         : '请在此选择可用模型，或在「API Provider」设置全局默认图像模型。');
-    get('generate').disabled = working || !ready
+    get('generate').disabled = working || !ready || Boolean(pipelineModel && !pipelineModel.selected)
       || (inBackgroundNode() && (!backgroundPrompt || selectedPrompt !== backgroundPrompt));
     get('export-lora').disabled = exportingLora || !value('lora');
     get('use-existing-lora').disabled = !value('existing-lora-select');
@@ -223,7 +227,9 @@
       if (!control.options || [...control.options].some((option) => option.value === text)) control.value = text;
     };
     const radios = get('form').querySelectorAll('[name="image-mode"]');
-    for (const radio of radios) radio.checked = radio.value === generation.mode;
+    if (!pipelineModel) for (const radio of radios) {
+      radio.checked = radio.value === (localPluginEnabled ? generation.mode : 'online');
+    }
     for (const [name, value] of [['base-model', generation.base_model], ['lora', generation.lora],
       ['weight', generation.weight], ['local-size', generation.size], ['seed', generation.seed ?? ''],
       ['sampler', generation.sampler], ['steps', generation.steps], ['cfg', generation.cfg],
@@ -350,8 +356,19 @@
       logBox.dataset.job = job.id;
       logBox.open = true;
     }
+    const modelRequest = job?.provider_request;
+    const requestElapsed = modelRequest && activeState(job) && modelRequest.phase !== 'received'
+      ? Math.max(modelRequest.elapsed, (Date.now() - Date.parse(job.started)) / 1000) : modelRequest?.elapsed;
     const log = job ? [
       `任务 ${job.id} · ${job.options.model || job.options.base_model || '本地工具'}`,
+      modelRequest && [
+        `${modelRequest.provider} / ${modelRequest.model}`,
+        modelRequest.status ? 'HTTP ' + modelRequest.status : '',
+        Number.isFinite(requestElapsed) ? `请求耗时 ${requestElapsed.toFixed(1)} 秒` : '',
+        `输入 ${modelRequest.prompt_chars.toLocaleString()} 字符`,
+        modelRequest.response_bytes != null ? `响应 ${modelRequest.response_bytes.toLocaleString()} 字节` : '',
+        ...tokenSummary(modelRequest.usage),
+      ].filter(Boolean).join(' · '),
       `[${job.started}] 已提交`, job.log, job.ended && `[${job.ended}] ${job.phase}${job.error ? ' · ' + job.error : ''}`,
       job.state === 'done' && job.kind === 'generate' ? `已保存 ${job.images.length} 张候选图` : '',
     ].filter(Boolean).join('\n') : '';
@@ -360,24 +377,25 @@
     const pending = Boolean(activeState(job));
     const completed = job?.state === 'done';
     reportNodeOutput('generation', job?.kind === 'generate' ? {
-      pending, label: completed ? '已完成的生成任务' : '',
+      pending, fromJob: true, label: completed ? '已完成的生成任务' : '',
       reference: completed ? {kind: 'job', id: job.id} : null,
     } : null);
-    const background = job?.kind === 'generate' && job.options.scene_design_id;
+    const background = job?.kind === 'generate' && (job.options.pipeline_node === 'background-generation'
+      || !job.options.pipeline_node && job.options.scene_design_id);
     if (background) {
       const chosen = backgroundSelection?.job === job.id ? backgroundSelection.name
         : job.images?.length === 1 ? job.images[0].name : '';
       reportNodeOutput('background-generation', {
-        pending, reference: completed && chosen ? {kind: 'artifact', id: `${job.id}/images/${chosen}`} : null,
+        pending, fromJob: true, reference: completed && chosen ? {kind: 'artifact', id: `${job.id}/images/${chosen}`} : null,
       });
     }
     reportNodeOutput('candidates', job?.kind === 'generate' ? {
-      pending, label: completed && job.images?.length ? `${job.images.length} 张候选图` : '',
+      fromJob: true, label: completed && job.images?.length ? `${job.images.length} 张候选图` : '',
       reference: completed && job.images?.length === 1
         ? {kind: 'artifact', id: `${job.id}/images/${job.images[0].name}`} : null,
     } : null);
     reportNodeOutput('train', job?.kind === 'train' ? {
-      pending, label: completed ? '训练已完成，可选择检查点' : '',
+      pending, fromJob: true, label: completed ? '训练已完成，可选择检查点' : '',
       reference: completed && job.checkpoints?.length === 1 && job.checkpoints[0].id
         ? {kind: 'lora', id: job.checkpoints[0].id} : null,
     } : null);
@@ -484,7 +502,9 @@
         throw new Error('当前生成界面无法选择该权重，请刷新模型列表。');
       }
       goWorkspace('stage-generation');
-      setMode(selection.generation.mode);
+      document.dispatchEvent(new CustomEvent('prisma-select-input', {
+        detail: {node: 'generation', port: 'model', source: 'models'},
+      }));
       get('lora').value = id;
       get('lora').onchange();
       get('compare').value = 'none';
@@ -568,8 +588,8 @@
     const background = route === '/generate' && inBackgroundNode();
     const node = route === '/generate' ? 'generation' : route === '/train' ? 'train' : null;
     const project = openProject?.id;
-    if (node) reportNodeOutput(node, {pending: true});
     if (background) reportNodeOutput('background-generation', {pending: true});
+    else if (node) reportNodeOutput(node, {pending: true});
     controls();
     try {
       const job = await json(route, data);
@@ -705,7 +725,10 @@
     }
     const data = {mode: mode(), prompt: value('prompt'), count: numeric('count')};
     if (selectedPrompt) data.prompt_id = selectedPrompt;
-    if (openProject) data.project_id = openProject.id;
+    if (openProject) {
+      data.project_id = openProject.id;
+      data.pipeline_node = inBackgroundNode() ? 'background-generation' : 'generation';
+    }
     if (data.mode === 'local') {
       const [width, height] = value('local-size').split('x').map(Number);
       const loras = [value('lora')];
@@ -1106,7 +1129,7 @@
       backgroundPrompt = selectedPrompt = result.prompt_id;
       get('prompt').value = result.prompt;
       get('negative').value = result.negative;
-      backgroundStatus.textContent = backgroundScene.dataset.draft === 'true' ? '当前提示词来自场景背景草稿。' : '';
+      backgroundStatus.textContent = '';
     } catch (error) {
       if (openProject?.id === project && inBackgroundNode() && backgroundScene.value === id) {
         backgroundStatus.textContent = error.message;
@@ -1125,11 +1148,8 @@
     backgroundStatus.textContent = '正在读取场景…';
     controls();
     try {
-      const draft = approved.length ? null : (await (await request('/api/pipeline/inputs',
-        {project_id: project, node: 'background-generation'})).json()).draft_scene_background;
       if (openProject?.id !== project || !inBackgroundNode()) return;
-      const scenes = draft?.references || approved;
-      backgroundScene.dataset.draft = String(Boolean(draft));
+      const scenes = approved;
       backgroundScene.replaceChildren(...scenes.map((item, index) => new Option(`${index + 1} · ${item.label}`, item.id)));
       backgroundScene.disabled = !scenes.length;
       if (scenes.some((item) => item.id === previous)) backgroundScene.value = previous;
@@ -1158,10 +1178,6 @@
   });
   document.addEventListener('prisma-node-tools', ({detail}) => {
     if (catalog && ['generation', 'background-generation', 'train'].includes(detail)) applyProjectDefaults();
-    if (detail === 'background-generation') {
-      otherPrompt ??= {id: selectedPrompt, text: value('prompt'), negative: value('negative')};
-      loadBackgroundScenes();
-    }
     if (detail === 'generation') {
       const ref = nodeInputs.find((item) => item.kind === 'prompt');
       if (ref) usePassedPrompt(ref, {onlyEmpty: true});
@@ -1179,7 +1195,36 @@
     }
     if (field('stage-tools').contains(get('library'))) loadLibrary();
   });
+  document.addEventListener('prisma-plugins-change', ({detail}) => {
+    localPluginEnabled = detail.plugins.some((plugin) => plugin.id === 'local-image' && plugin.enabled);
+    const localRadio = get('form').querySelector('[name="image-mode"][value="local"]');
+    localRadio.disabled = !localPluginEnabled;
+    field('config-image-mode').querySelector('option[value="local"]').disabled = !localPluginEnabled;
+    field('settings-training').hidden = !localPluginEnabled;
+    document.querySelector('.config-nav a[href="#settings-training"]').hidden = !localPluginEnabled;
+    if (!localPluginEnabled) setMode('online');
+    controls();
+  });
+  document.addEventListener('prisma-node-inputs', ({detail}) => {
+    pipelineModel = ['generation', 'background-generation'].includes(detail.node)
+      ? detail.ports.find((port) => port.id === 'model') : null;
+    get('form').querySelector('.mode-switch').hidden = Boolean(pipelineModel);
+    if (detail.node === 'background-generation' && detail.ports.every((port) => !port.required || port.selected)) {
+      const key = `${openProject?.id}/${nodeInputs.filter((item) => item.kind === 'scene-design').map((item) => item.id).join(',')}`;
+      if (backgroundInputsKey !== key) {
+        backgroundInputsKey = key;
+        otherPrompt ??= {id: selectedPrompt, text: value('prompt'), negative: value('negative')};
+        loadBackgroundScenes();
+      }
+    }
+    controls();
+  });
   document.addEventListener('prisma-before-view-change', ({detail}) => {
+    if (!['generation', 'background-generation'].includes(detail)) {
+      pipelineModel = null;
+      get('form').querySelector('.mode-switch').hidden = false;
+    }
+    if (detail !== 'background-generation') backgroundInputsKey = '';
     if (detail === 'background-generation' || !otherPrompt) return;
     selectedPrompt = otherPrompt.id;
     get('prompt').value = otherPrompt.text;

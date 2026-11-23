@@ -15,7 +15,6 @@ from urllib.request import ProxyHandler, Request, build_opener
 from image_jobs import Busy, JOB_ID, own_workspace
 from image_toolkit import IMAGE_TYPES, ImageToolkit, child_file
 from lora_export import ARCHIVE_NAME, save_export
-from pipeline_workflow import ROADMAP
 from prisma_mcp import PrismaMCP, VERSIONS, rpc_error
 from prisma_workflow import inspect, require_text
 from script_story import inspect_story
@@ -26,6 +25,7 @@ STATIC = {
     "/": ("web/index.html", "text/html; charset=utf-8"),
     "/app.css": ("web/app.css", "text/css; charset=utf-8"),
     "/app.js": ("web/app.js", "text/javascript; charset=utf-8"),
+    "/plugins.js": ("web/plugins.js", "text/javascript; charset=utf-8"),
     "/providers.js": ("web/providers.js", "text/javascript; charset=utf-8"),
     "/images.js": ("web/images.js", "text/javascript; charset=utf-8"),
     "/pipeline.js": ("web/pipeline.js", "text/javascript; charset=utf-8"),
@@ -43,11 +43,24 @@ STATIC = {
 }
 MAX_REQUEST = 64 * 1024 * 1024
 
+NODE_ROUTES = {
+    '/api/draft': 'scenario_draft', '/api/scenario/production/generate': 'scenario_production_generate',
+    '/api/scenario/production/publish': 'scenario_production_publish',
+    '/api/asset-prompt': 'scenario_asset_prompt', '/api/scenario/background-prompt': 'scenario_background_prompt',
+    '/api/speech/generate': 'speech_generate', '/api/script/preview': 'script_preview',
+    '/api/script/bind': 'script_bind', '/api/build': 'renpy_export',
+    '/api/images/generate': 'image_generate', '/api/images/install': 'image_install',
+    '/api/images/datasets': 'dataset_save', '/api/images/datasets/restore': 'dataset_restore',
+    '/api/images/loras': 'lora_import', '/api/images/loras/prepare': 'lora_prepare',
+    '/api/images/loras/export': 'lora_export', '/api/images/train': 'lora_train',
+    '/api/images/replay': 'image_replay',
+}
 
-def roadmap_nav_links() -> bytes:
+
+def roadmap_nav_links(registry) -> bytes:
     return '\n'.join(
-        f'<a href="#stage-{node["id"]}">{escape(node["title"])}</a>'
-        for node in ROADMAP['nodes']
+        f'<a href="#stage-{node.id}">{escape(node.title)}</a>'
+        for node in registry.nodes.values()
     ).encode('utf-8')
 
 
@@ -136,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
         nonce = secrets.token_urlsafe() if path == '/' else None
         if nonce:
             content = content.replace(b'__PRISMA_STYLE_NONCE__', nonce.encode('ascii'), 1)
-            content = content.replace(b'<!-- PRISMA_ROADMAP_LINKS -->', roadmap_nav_links(), 1)
+            content = content.replace(b'<!-- PRISMA_ROADMAP_LINKS -->', roadmap_nav_links(self.server.mcp.pipeline.registry), 1)
         self.respond(200, mime, content, nonce=nonce)
 
     def mcp_no_stream(self):
@@ -285,6 +298,9 @@ class Handler(BaseHTTPRequestHandler):
                   '/api/pipeline/approved': pipeline.approved,
                   '/api/pipeline/reusable': pipeline.reusable,
                   '/api/pipeline/action': pipeline.decide,
+                  '/api/pipeline/check': pipeline.require_ready,
+                  '/api/plugins/list': self.server.mcp.plugins.list,
+                  '/api/plugins/set-enabled': self.server.mcp.plugins.set_enabled,
                   '/api/workspace/assets/import': self.server.images.import_workspace_asset,
                   '/api/images/loras/prepare': self.server.images.prepare_lora,
                   '/api/images/library/list': self.server.images.library_list,
@@ -329,12 +345,12 @@ class Handler(BaseHTTPRequestHandler):
             if data.get('project_id'):
                 projects.project_record(data['project_id'])
             if self.path in image_routes:
-                payload = image_routes[self.path](data)
+                payload = self.server.mcp.run_operation(NODE_ROUTES.get(self.path), data, image_routes[self.path])
                 self.respond_json(202 if 'state' in payload else 201, payload)
             elif self.path in routes:
-                self.respond_json(200, routes[self.path](data))
+                self.respond_json(200, self.server.mcp.run_operation(NODE_ROUTES.get(self.path), data, routes[self.path]))
             else:
-                self.build(data)
+                self.server.mcp.run_operation(NODE_ROUTES[self.path], data, self.build)
         except Busy as error:
             self.respond_json(409, {'error': str(error)})
         except (ValueError, binascii.Error, OSError) as error:
@@ -351,6 +367,8 @@ def main() -> None:
     parser.add_argument('--image-workspace', type=Path, help='directory for downloads, training datasets and image jobs')
     parser.add_argument('--reference-dir', type=Path, help='directory with training images and optional same-name .txt captions')
     parser.add_argument('--no-existing-media', action='store_true', help='do not discover the older pilot models or tools')
+    parser.add_argument('--node-manifest', type=Path, action='append', default=[],
+                        help='register additional MetaNode definitions from a local JSON manifest (repeatable)')
     args = parser.parse_args()
     images = ImageToolkit(ROOT, workspace=args.image_workspace, reference=args.reference_dir,
                           use_existing=not args.no_existing_media)
@@ -362,7 +380,10 @@ def main() -> None:
             with images.library.connection() as db:
                 db.execute("UPDATE generation_runs SET state='interrupted' WHERE state='running'")
             base = f'http://127.0.0.1:{server.server_port}'
-            server.mcp = PrismaMCP(images, base)
+            try:
+                server.mcp = PrismaMCP(images, base, node_manifests=args.node_manifest)
+            except (OSError, ValueError) as error:
+                parser.error(str(error))
             temporary = manifest.with_suffix('.json.part')
             temporary.write_text(json.dumps({'base': base, 'pid': os.getpid()}), encoding='utf-8')
             temporary.replace(manifest)
@@ -380,6 +401,8 @@ def main() -> None:
                 except (OSError, ValueError):
                     pass
     except Busy as error:
+        if args.node_manifest:
+            parser.exit(1, f'{error}\n节点清单在服务启动时加载，请先停止当前工作目录对应的服务。\n')
         base = f'http://127.0.0.1:{args.port}'
         try:
             current = json.loads(manifest.read_text(encoding='utf-8'))

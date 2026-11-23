@@ -1,11 +1,10 @@
 """Source anchored Scenario staging and project asset briefs."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from hashlib import sha256
 import json
 from pathlib import Path
 import re
 
-from api_providers import api_request
 from prisma import Line, Scene, parse_scenario, render_script, scenario_document
 
 HEADING = re.compile(r'^#{1,4}\s+(.+)$')
@@ -139,8 +138,8 @@ class ScenarioProduction:
             'first_line': c['rows'][0]['at'], 'last_line': c['rows'][-1]['at'], 'lines': len(c['rows'])}
             for c in chapters], 'defaults': self.defaults(project['id'])}
 
-    def _annotate(self, provider, model, settings, title, rows, context, starts):
-        sample = {'chapter': title, 'chapter_start': starts, 'preceding_context_not_targets': context,
+    def _annotate(self, provider, model, settings, rows, preceding, trace, event):
+        sample = {'chapter': trace['chapter'], 'chapter_start': trace['batch'] == 1, 'preceding_context_not_targets': preceding,
                   'lines': [[r['at'], 'Q' if r['q'] else 'N', r['text']] for r in rows]}
         protocol = provider['protocol']
         system = PROMPT.replace('FACE_IDS', ', '.join(FACES))
@@ -156,16 +155,16 @@ class ScenarioProduction:
             if settings['json_mode']:
                 payload['response_format'] = {'type': 'json_object'}
         try:
-            result = api_request(provider, 'messages' if protocol == 'anthropic' else 'chat/completions',
-                                 payload, timeout=settings['timeout'], limit=2_000_000)
-            return annotations(result, protocol)
+            return event.request(provider, 'messages' if protocol == 'anthropic' else 'chat/completions',
+                                 payload, timeout=settings['timeout'], limit=2_000_000, context=trace,
+                                 parse=lambda result: annotations(result, protocol))
         except (KeyError, IndexError, AttributeError, TypeError, ValueError) as error:
-            raise ValueError(f'{title}，原文 {rows[0]["at"]}–{rows[-1]["at"]} 行：{error}') from None
+            raise ValueError(f'{trace["chapter"]}，原文 {rows[0]["at"]}–{rows[-1]["at"]} 行：{error}') from None
 
     def generate(self, data):
         return self.studio._record_run('scenario', data, self._generate)
 
-    def _generate(self, data, event, _save_failed_response):
+    def _generate(self, data, event):
         project = self.resources.load_project({'id': data['project_id']})
         ident, chapters = project['id'], source_chapters(project['raw'])
         first, count = data.get('chapter_start', 1), data.get('chapter_count', 1)
@@ -193,25 +192,31 @@ class ScenarioProduction:
             for offset in range(0, len(rows), settings['window']):
                 batch = rows[offset:offset + settings['window']]
                 context = rows[max(0, offset - 12):offset]
+                trace = {'chapter': chapter['title'], 'number': chapter['number'], 'batch': offset // settings['window'] + 1,
+                         'first_line': batch[0]['at'], 'last_line': batch[-1]['at']}
                 key = sha256(json.dumps([ident, PROMPT, FACES, settings, chapter['title'], batch, context],
                                         ensure_ascii=False).encode()).hexdigest()
                 try:
                     result = self.resources.library.get('production-checkpoint', key)['metadata']['annotations']
                 except FileNotFoundError:
-                    result = self._annotate(provider, model['id'], settings, chapter['title'], batch, context, not offset)
+                    result = self._annotate(provider, model['id'], settings, batch, context, trace, event)
                     self.resources._save({'kind':'production-checkpoint','id':key,'label':chapter['title'],
                         'metadata':{'project_id':ident, 'annotations':result, 'settings':settings},
                         'links':self.resources.ownership(ident)})
+                else:
+                    event.cached(trace)
                 for key in merged:
                     merged[key].extend(result[key])
             return merged
 
         with ThreadPoolExecutor(max_workers=3) as pool:
-            model_outputs = []
-            for chapter, output in zip(selected, pool.map(annotate_chapter, selected)):
-                model_outputs.append(output)
+            model_outputs = {}
+            futures = {pool.submit(annotate_chapter, chapter): chapter for chapter in selected}
+            for future in as_completed(futures):
+                chapter = futures[future]
+                model_outputs[chapter['number']] = future.result()
                 event(f'已收到《{chapter["title"]}》的演出标注。')
-        return self.record(project, chapters, selected, model_outputs, settings)
+        return self.record(project, chapters, selected, [model_outputs[c['number']] for c in selected], settings)
 
     def import_annotations(self, data):
         project = self.resources.load_project({'id': data['project_id']})

@@ -7,6 +7,7 @@
   <title>Prisma · 视觉小说工作台</title>
   <link rel="stylesheet" href="/app.css">
   <script src="/app.js" defer></script>
+  <script src="/plugins.js" defer></script>
   <script src="/providers.js" defer></script>
   <script src="/pipeline-layout.js" defer></script>
   <script src="/pipeline.js" defer></script>
@@ -58,6 +59,7 @@
         <div class="nav-group nav-primary">
           <a id="nav-project-library" href="#project-manager"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-library"></use></svg><span>项目库</span></a>
           <a id="nav-api-providers" href="#api-providers"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-settings"></use></svg><span>API Provider</span></a>
+          <a href="#plugin-manager"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-layers"></use></svg><span>插件管理</span></a>
           <button id="project-nav-toggle" class="nav-toggle" type="button" aria-expanded="false" aria-controls="project-nav">项目导航</button>
         </div>
         <div id="project-nav" class="project-nav">
@@ -126,8 +128,10 @@
             </div>
           </div>
           <div class="flow-legend" aria-label="路线图图例">
-            <span class="legend-unfinished">未完成</span><span class="legend-working">进行中</span>
-            <span class="legend-completed">已完成</span><span class="legend-skipped">已跳过</span>
+            <span class="legend-unfinished">未完成</span><span class="legend-upstream-wait">等待上游</span>
+            <span class="legend-processing-wait">等待处理</span><span class="legend-working">处理中</span>
+            <span class="legend-review">等待审核</span><span class="legend-completed">已通过</span>
+            <span class="legend-skipped">被跳过</span>
             <div id="flow-neighborhood-legend" class="flow-neighborhood-legend" hidden>
               <span class="legend-upstream">直接上游</span><span class="legend-downstream">直接下游</span>
               <span id="flow-neighborhood-both" class="legend-both" hidden>双向依赖</span>
@@ -168,6 +172,7 @@
             <div class="node-flow-copy">
               <h3>直接上下游</h3>
               <p id="flow-detail-input" class="hint"></p>
+              <ul id="stage-input-ports" class="stage-input-ports" aria-label="输入口" hidden></ul>
             </div>
             <div class="node-neighborhood-scroll flow-graph-scroll" role="region" aria-label="此节点的直接上下游">
               <div id="stage-neighborhood" class="stage-neighborhood flow-graph has-neighborhood" role="group"></div>
@@ -353,6 +358,13 @@
           </section>
         </div>
       </section>
+      <section id="plugin-manager" class="workspace-view" data-workspace-view="插件管理" hidden>
+        <section class="panel" aria-labelledby="plugin-list-heading">
+          <h2 id="plugin-list-heading">工作区插件</h2>
+          <p id="plugin-list-status" class="hint" role="status">正在读取插件…</p>
+          <ul id="plugin-list" class="plugin-list"></ul>
+        </section>
+      </section>
       <section id="api-providers" class="workspace-view" data-workspace-view="API Provider" hidden>
         <div class="work-grid project-config-grid">
           <section class="panel" id="settings-api" aria-labelledby="provider-list-title">
@@ -503,7 +515,11 @@
           <button id="draft" class="primary" type="button"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-spark"></use></svg>生成 Scenario</button>
         </div>
         <section id="scenario-request-log" class="generation-request-log" aria-label="Scenario 生成日志">
-          <div><strong>生成日志</strong><span role="status">暂无运行记录</span></div><ol></ol>
+          <div><strong>生成日志</strong><span role="status">暂无运行记录</span></div>
+          <label class="studio-field request-log-history" hidden>运行记录<select aria-label="Scenario 运行记录"></select></label>
+          <p class="request-log-summary hint" hidden></p>
+          <div class="request-log-requests"></div>
+          <ol></ol>
           <details id="scenario-response-preview" hidden>
             <summary>查看失败的模型响应</summary>
             <pre></pre>
@@ -580,7 +596,11 @@
           </form>
           <audio id="voice-preview" controls hidden></audio>
           <section id="voice-request-log" class="generation-request-log" aria-label="配音生成日志">
-            <div><strong>生成日志</strong><span role="status">暂无运行记录</span></div><ol></ol>
+            <div><strong>生成日志</strong><span role="status">暂无运行记录</span></div>
+            <label class="studio-field request-log-history" hidden>运行记录<select aria-label="配音运行记录"></select></label>
+            <p class="request-log-summary hint" hidden></p>
+            <div class="request-log-requests"></div>
+            <ol></ol>
           </section>
         </section>
         </div>
@@ -921,8 +941,8 @@
         <form id="image-form" class="image-card">
           <fieldset class="mode-switch">
             <legend class="sr-only">图像模型来源</legend>
-            <label><input type="radio" name="image-mode" value="local" checked><span>本地模型</span></label>
-            <label><input type="radio" name="image-mode" value="online"><span>Provider</span></label>
+            <label><input type="radio" name="image-mode" value="local" disabled><span>本地模型</span></label>
+            <label><input type="radio" name="image-mode" value="online" checked><span>Provider</span></label>
           </fieldset>
           <p id="image-mode-note" class="hint"></p>
           <div id="image-prompt-tools"><div class="studio-actions prompt-actions">

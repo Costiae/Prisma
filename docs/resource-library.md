@@ -8,7 +8,9 @@
 
 `scenario_production_review` 的 `cg` 是当前制作稿的完整 CG 列表，每条填写原文行 `at`、`title`、`composition` 和 `reason`。省略 `cg` 会沿用已有标记，传空列表可清空。通过 `character_roles` 按已登记名称填写 `role` 和 `reason`，分级允许 `primary`、`secondary`、`unreviewed`。发布后可用 `scenario_production_registry` 的 `cg-design` 查看 CG 声明，或用 `character-design` 加 `portraits_only: true` 读取立绘制作名单。在验证一份模型制作稿后，可用 `scenario_production_defaults_save` 保存该次模型和实际参数。
 
-「场景背景」传出背景提示词和场景 BGM 需求。「背景生成」用 `pipeline_inputs` 读取已通过的场景背景，或从 `draft_scene_background` 选用场景草稿。通过 `scenario_background_prompt` 载入提示词，把返回的 `prompt_id` 随 `image_generate` 提交。背景生成和事件 CG 节点通过时须关联已可用的图片文件。「音乐生成」的 `pipeline_inputs` 提供整体曲风、场景 BGM 和角色曲参考。场景 BGM 草稿可以在背景出图前试用。
+「场景背景」传出背景提示词和场景 BGM 需求。「背景生成」收到已通过的场景背景和一个可用的图像模型来源后，通过 `scenario_background_prompt` 载入提示词，把返回的 `prompt_id` 和 `pipeline_node: "background-generation"` 随 `image_generate` 提交。背景生成和事件 CG 节点通过时须关联已可用的图片文件。「音乐生成」的 `pipeline_inputs` 提供整体曲风、场景 BGM 和角色曲参考，场景草稿可以预览。
+
+Scenario 和配音节点的生成日志按项目与运行保存，可用 `generation_log` 按 `run_id` 查询，或用 `include_history: true` 列出近期运行。每次模型请求都记录模型、接口、耗时、服务返回的 Token 和停止原因。Scenario 按章制作还会记录分批的原文范围和缓存命中。文本接口支持流式返回时可预览最近 1,200 个正文字符，思考正文只计字符数，不保存内容。发生解析或校验失败时，可用 `request_id` 和 `include_response: true` 读取对应的失败正文，最多保留 262,144 字符。在线图片的 Provider 和响应统计随任务保存，通过 `image_job` 查询。
 
 每个 Prisma 工作目录有自己的 `catalog.sqlite3`，默认位于 `build/prisma-images/`。项目、剧本、演出绑定、提示词、素材、工具、模型、训练数据、任务和导出使用同一个目录。SQLite 保存可搜索的记录和关系，任务的完整参数及日志可通过任务 ID 查看。
 
@@ -55,21 +57,65 @@ CodeMirror 构建产物随仓库提供，启动 WebUI 时直接加载。修改�
 
 每个路线图节点有独立工作台。工作台顶部用小图显示当前节点和直接上下游，点击邻接节点即可切换。中间显示工具、参数、当前结果和节点版本。项目中已导入的原文会直接出现在原文节点。
 
-底部「重试」用当前参数重新运行本节点，或回到本节点手动调整。「通过」把当前结果自动传给所有直接下游。路线图以颜色区分未完成、进行中、已完成和已跳过。一个节点只有在所有直接下游都已完成、输入版本仍有效且没有使用该节点的结果时才显示「已跳过」。
+底部「重试」用当前参数重新运行本节点，或回到本节点手动调整。「通过」把当前结果自动传给所有直接下游。
 
-在「LoRA 训练」或「本地模型与工具」中可加载或导入已有 LoRA，然后直接进入本地出图。实际生成需要当前设备支持对应的底模和推理环境。MCP 用 `lora_import` 登记文件，用 `lora_prepare` 获取本地生成配置和环境状态。
+| 状态 | 含义 |
+| --- | --- |
+| 未完成 | 本节点没开始操作，也没有收到上游数据。 |
+| 等待上游 | 所需的上游输出还没到齐。节点工作台列出缺少的来源。 |
+| 等待处理 | 所需的上游输出已到齐，可以开始运行或重新处理。 |
+| 处理中 | 本节点的工具正在运行。 |
+| 等待审核 | 已有产物可检查，由作者选择「重试」或「通过」。导入的已有产物也可以进入审核。 |
+| 已通过 | 当前产物已人工放行，所有直接下游可使用。 |
+| 被跳过 | 本节点没有可放行的产物，直接下游都已用其他数据完成，且这些下游的通过版本仍与其输入一致。 |
+
+每个必需输入口都须收到一个已通过的来源。同一口有多个来源时任一来源通过即可，工作台在多个来源就绪时提供选择。输入缺失会禁用节点工具和「重试」「通过」，后端也会拒绝运行。反馈边仍传递已通过的产物，并且不影响首次运行。用 `pipeline_state.statuses` 或 `pipeline_inputs.status` 查看输入口、已通过来源和缺项。MCP 可用 `pipeline_check` 在运行前校验输入，传 `input_sources` 指定输入口所用的来源。节点版本记录实际选用的来源和版本。
+
+「图像生成」有一个必需的「图像模型」输入口。点击「在线图像 API」通过即可使用 Provider。启用「本地图像与 LoRA」插件后，「本地模型与工具」也可向该输入口提交本地模型或 LoRA。只有一个来源就绪时自动选用，两者都就绪时在输入口切换。提示词可以手写、载入样例或沿用已通过的资产提示词。训练仍须同时收到已通过的模型和数据集。
 
 下游只接收已通过且选中本节点的上游版本。更新输入后，旧结果不会自动流入下游。每个版本记录所属项目、使用的上游版本和产物引用，可从资源目录追溯来源。
 
-在仓库根目录的 `pipeline-nodes.json` 注册节点。每个节点有稳定的 `id`、名称、输入与产物说明，通过 `panels` 指定工具面板，通过 `retry_control` 指定重试触发的操作。左侧「路线图」下按注册顺序列出所有节点，包括规划中的节点和参考输入。修改线路只需改目标节点的 `depends_on`。有意的回流用 `{"node":"train","feedback":true}` 表示。重启 Prisma 后，前端根据依赖生成节点、箭头和产物表，旧版项目的节点历史仍可读取。
+在仓库根目录的 `pipeline-nodes.json` 注册内建节点。清单中的每项都继承 `MetaNode`，共用路线图排版、节点工作台、输入状态、版本历史和「重试」「通过」操作。左侧「路线图」按注册顺序列出节点。修改线路时改目标节点的 `depends_on`，有意的回流用 `{"node":"train","feedback":true}` 表示。节点 ID 用于关联历史版本，改名时保留 ID。
 
-MCP 可用 `pipeline_state` 查看拓扑和当前版本，`pipeline_inputs` 获取指定节点已通过的上游版本，`pipeline_reusable` 查找可复用产物。`pipeline_action` 与 WebUI 共用节点操作，支持 `retry` 和 `pass`。更新节点时传最近版本的 `id` 作为 `base`，通过时传入当前有效的上游版本 ID，避免把旧输入的结果误传给下游；通过后的版本自动传给所有直接下游。
+MCP 可用 `pipeline_state` 查看拓扑和当前版本，`pipeline_inputs` 获取指定节点接收的上游版本，`pipeline_reusable` 查找可复用产物。`pipeline_action` 与 WebUI 共用 `retry`、`pass` 和 `withdraw` 操作。更新节点时传最近版本的 `id` 作为 `base`，通过时可用 `inputs` 核对上游版本。已有成果可用 `withdraw` 退回，方便撤回当前发布。
+
+### 用清单添加节点
+
+扩展节点可以放在单独的 JSON 清单里。以下节点接收已通过的 Scenario，作者在通用工作台提交审阅说明，也可关联目录中的剧本资源。
+
+```json
+{
+  "version": 1,
+  "extends": "MetaNode",
+  "nodes": [
+    {
+      "id": "example-script-review",
+      "title": "剧本复核",
+      "input": "已通过的 Scenario。",
+      "output": "审阅说明和复核过的剧本。",
+      "kind": "partial",
+      "depends_on": ["scenario"],
+      "reuse": ["scenario"]
+    }
+  ]
+}
+```
+
+将清单保存为 `review-nodes.json` 后，用 `python webui.py --node-manifest review-nodes.json` 启动或重启服务。可以重复传入 `--node-manifest`。启动时会合并内建和附加节点，并检查重复 ID、未知依赖和未标记为回流的环。WebUI 与所连接的 MCP 使用同一个注册表。
+
+必填字段为 `id`、`title`、`input` 和 `output`。省略 `kind` 时为 `live`，省略 `reuse` 时可选用原文和素材。旧写法 `depends_on` 为每个普通上游各创建一个必需输入口。要为一个输入口提供可替换来源，可在节点上声明 `"input_ports": [{"id":"model","title":"图像模型","sources":["online","models"]}]`。可选输入口声明 `"required": false`。未指定 `panels` 时使用通用工作台。可用 `retry_control` 指定已有重试控件。
+
+### 插件管理
+
+从侧栏「插件管理」启用或停用插件，配置对当前工作区生效，重启后仍保留。「本地图像与 LoRA」默认停用，其中包括本地模型与工具、训练数据集和 LoRA 训练三个节点。停用会从路线图移除这三个节点及其可选来源，已生成的文件、节点版本和权重会保留，重新启用后可以继续用。
+
+附加的 MetaNode 清单可在顶层添加 `"plugin": {"id":"example-review","title":"审阅工具","description":"提供剧本复核节点。"}`，再通过 `--node-manifest` 登记为可启停的插件。MCP 使用 `plugin_list` 查询，用 `plugin_set_enabled` 传插件 `id` 和 `enabled` 切换状态。
 
 ## 已通过资产
 
 打开项目后，从侧栏进入「已通过资产」。这里集中展示各节点当前通过的成果，可以按节点筛选或按文件名、资源 ID 搜索。点选成果可查看版本和原有资源，预览图片、试听音频或读取文档。素材快照会列出当时选用的文件。直接上游版本发生变化时，该成果标为「待复核」。选择「退回修改」会停止传递该版本，并保留版本记录。
 
-MCP 用 `pipeline_approved` 读取同一份列表，传 `project_id`，也可加 `node` 读取单个节点的完整说明。选择资源后用 `library_item` 查看详情。退回可用 `pipeline_action` 的 `retry`，并将当前版本 ID 传给 `base`。
+MCP 用 `pipeline_approved` 读取同一份列表，传 `project_id`，也可加 `node` 读取单个节点的完整说明。选择资源后用 `library_item` 查看详情。退回可用 `pipeline_action` 的 `withdraw`，并将当前版本 ID 传给 `base`。
 
 ## MCP
 

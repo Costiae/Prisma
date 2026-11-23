@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "extends": "MetaNode",
+  "plugin": {
+    "id": "local-image",
+    "title": "本地图像与 LoRA",
+    "description": "启用本地模型、训练数据集和 LoRA 训练，并为图像生成提供本地模型来源。"
+  },
+  "nodes": [
+    {
+      "id": "models",
+      "title": "本地模型与工具",
+      "input": "按平台安装推理组件和底模。可导入 LoRA，或使用已有训练检查点。",
+      "output": "底模、LoRA、Seed、采样器、尺寸和推理参数由本地生成任务记录。",
+      "workspace": "local-toolkit",
+      "depends_on": [
+        {
+          "node": "train",
+          "feedback": true
+        }
+      ],
+      "work_label": "管理底模与推理工具",
+      "reuse": [
+        "lora",
+        "model",
+        "tool"
+      ],
+      "reuse_workspace": "image-existing-lora",
+      "reuse_label": "使用或导入已有权重",
+      "panels": [
+        "toolkit-status",
+        "image-existing-lora",
+        "image-toolchain"
+      ]
+    },
+    {
+      "id": "dataset",
+      "title": "训练数据集",
+      "input": "从参考目录或上传图片与标注，或恢复已有数据集 ZIP。",
+      "output": "保存选图、标注、触发词和文件哈希。",
+      "workspace": "image-dataset-form",
+      "work_label": "建立或恢复数据集",
+      "reuse": [
+        "dataset"
+      ],
+      "panels": [
+        "toolkit-status",
+        "image-dataset-form"
+      ]
+    },
+    {
+      "id": "train",
+      "title": "LoRA 训练",
+      "input": "训练数据集、选定底模、训练参数和可选续训起点。",
+      "output": "训练任务登记训练配置、日志与检查点。",
+      "workspace": "image-train-form",
+      "depends_on": [
+        "dataset",
+        "models"
+      ],
+      "work_label": "训练新 LoRA",
+      "reuse": [
+        "lora"
+      ],
+      "reuse_workspace": "image-existing-lora",
+      "reuse_label": "使用或导入已有权重",
+      "panels": [
+        "toolkit-status",
+        "image-existing-lora",
+        "image-train-form",
+        "image-results"
+      ],
+      "retry_control": "image-train"
+    }
+  ]
+}

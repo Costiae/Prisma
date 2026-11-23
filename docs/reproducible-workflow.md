@@ -28,7 +28,7 @@ MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 
 ## 路径一 · 调用在线图像 API
 
 1. 在「API Provider」选择兼容格式，填写 API 地址和 Key。使用 Fetch Models 同步 metadata，目录不可用时手动填入模型 ID 并指定用途。连接测试读取 `/models`。在下方设置默认图像模型，或在图像生成节点指定 Provider 中的模型。
-2. 在 WebUI 选择「在线模型」，或在 MCP 调用 `image_catalog` 确认 `online.ready`，然后调用 `image_generate`。在线模式会把 `prompt` 发送给 OpenAI，并按账号计费。这条路线无需下载底模和本地工具。
+2. 在项目的「在线图像 API」节点通过当前模型，再进入「图像生成」。MCP 可用 `image_catalog` 查询 `online.ready`，用 `pipeline_inputs` 检查模型输入，随后调用 `image_generate`。在线模式会把提示词发送给选定的 Provider，并按账号计费。这条路线无需下载底模和本地工具。
 3. 用 `image_job` 查询任务 ID，等 `state` 为 `done`。WebUI 可以直接预览，MCP 可以用 `image_artifact` 读取图片或获取下载地址。
 
 下面的 `image_generate` 请求会生成一张横向背景图。
@@ -37,7 +37,6 @@ MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 
 {
   "mode": "online",
   "prompt": "A cozy library at dusk, bright flat cel colors, visual novel background",
-  "model": "gpt-image-1.5",
   "size": "1536x1024",
   "quality": "medium",
   "count": 1
@@ -47,6 +46,8 @@ MCP 使用标准 JSON-RPC，支持 `2025-11-25`、`2025-06-18` 和 `2025-03-26` 
 重提在线任务会创建新的 API 请求。在线结果受服务端模型版本和行为影响，记录可以还原请求参数，重提可能得到不同图片。
 
 ## 路径二 · 安装本地模型并训练 LoRA
+
+先在「插件管理」启用「本地图像与 LoRA」，也可以调用 `plugin_set_enabled` 并传 `{"id":"local-image","enabled":true}`。在项目内运行时，先通过「本地模型与工具」和「训练数据集」，再运行 LoRA 训练。出图时可以在「图像模型」输入口选择已通过的本地来源。
 
 本地推理支持 Windows x64 与 Vulkan；Apple Silicon 支持 MPS 与原生 MLX。本机动漫风格训练优先使用 **Anima Base + MFlux / Apple MLX**：Anima 是动漫与插画专用的 2B 模型，Base 变体适合 LoRA 训练；MFlux 训练全部 28 个 transformer block 的注意力、MLP 和 AdaLN 模块，训练 LoRA 输出 ComfyUI 兼容权重。该路径使用 512 分辨率、Rank 16、batch size 1、梯度检查点和 2 GB MLX 缓存。MFlux 固定为官方提交 `02b92461ec246ec44f5149b5dc3f69817a263a67`；Anima Base 固定为仓库提交 `457fbf842cb86e96af72c65bdd13e3f1c448de84`，模型/VAE/文字编码器约 5.7 GB。Qwen3 和 T5 tokenizer 在安装时解析并固定各自修订，所有文件哈希写入安装与训练任务记录。Anima 模型与其衍生权重仅限非商业用途；生成图片的使用权依模型卡条款处理。Iris-3B 也使用该 MLX 环境；其 Base 权重和 Qwen3-VL 文本编码器约 20 GB。SD 1.x 与 SDXL 训练仍支持 Windows x64/CUDA 12.4 和 Apple Silicon/MPS：SD 1.x 使用 512 分辨率，SDXL 使用 1024 分辨率并训练 U-Net LoRA。Animagine XL 4.0 Opt 固定到 `cagliostrolab/animagine-xl-4.0` revision `2b7c1b397761bf5bd3cc42e5b39ec99314a75a96`，SHA-256 为 `6327eca98bfb6538dd7a4edce22484a1bbc57a8cff6b11d075d40da1afb847ac`。SD 1.x/SDXL 使用隔离的 Python 3.10.20 和固定版 sd-scripts；MFlux 使用独立 Python 3.13。
 

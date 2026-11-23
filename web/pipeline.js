@@ -1,5 +1,7 @@
 (() => {
   const kinds = {live: '已接通', partial: '手动处理', plan: '尚未接入', reference: '参考输入'};
+  const nodeStateLabels = {unfinished: '未完成', waiting_upstream: '等待上游', waiting_processing: '等待处理',
+    processing: '处理中', waiting_review: '等待审核', released: '已通过', skipped: '被跳过'};
   const resourceNames = {source: '原文', scenario: '剧本', cues: '演出', prompt: '提示词',
     asset: '素材', job: '任务', artifact: '产物', model: '模型', lora: 'LoRA',
     dataset: '数据集', revision: '项目版本', export: '导出', tool: '工具', script: '脚本',
@@ -25,6 +27,7 @@
   let previewSequence = 0;
   const drafts = new Map();
   const outputs = new Map();
+  const inputChoices = new Map();
   const graph = pipeline.querySelector('.flow-graph');
   const stageView = field('pipeline-stage');
   const tools = field('stage-tools');
@@ -37,38 +40,52 @@
   const outgoing = (node) => state?.roadmap.edges.filter((edge) => edge.source === node) || [];
   const release = (edge) => {
     const item = head(edge.source);
-    return item?.status === 'released' ? item : null;
+    return item?.status === 'released' && selectedInputs(edge.target).received[edge.source] === item.id ? item : null;
   };
+
+  function selectedInputs(node) {
+    const status = state?.statuses?.[node];
+    const choices = inputChoices.get(`${openProject?.id}/${node}`) || {};
+    const ports = (status?.ports || []).map((port) => ({
+      ...port, selected: Object.hasOwn(port.available, choices[port.id] || '') ? choices[port.id] : port.selected,
+    }));
+    const received = Object.fromEntries(incoming(node).filter((edge) => edge.feedback && status?.received[edge.source])
+      .map((edge) => [edge.source, status.received[edge.source]]));
+    for (const port of ports) {
+      if (port.selected) received[port.selected] = port.available[port.selected];
+    }
+    return {ports, received, missing: ports.filter((port) => port.required && !port.selected)};
+  }
 
   function inputVersionsChanged(node, item = head(node)) {
     if (!item) return false;
-    const current = Object.fromEntries(incoming(node).map(release).filter(Boolean)
-      .map((entry) => [entry.node, entry.id]));
-    return JSON.stringify(item.inputs || {}) !== JSON.stringify(current);
+    const current = selectedInputs(node).received;
+    const previous = item.inputs || {};
+    return Object.keys(previous).length !== Object.keys(current).length
+      || Object.entries(current).some(([source, id]) => previous[source] !== id);
   }
 
   function nodeStatus(node) {
-    const item = head(node);
-    const live = currentOutput(node);
-    if (nodesById.get(node)?.required_output === 'image' && item?.status === 'refine' && !live) return '未完成';
-    if (live?.pending || ['pending', 'refine'].includes(item?.status)) return '进行中';
-    if (item?.status === 'released') {
-      if (inputVersionsChanged(node, item)) return live ? '进行中' : '未完成';
-      return '已完成';
+    const stored = state?.statuses?.[node]?.state || 'unfinished';
+    const observed = currentOutput(node);
+    const local = observed?.fromJob ? null : observed;
+    const nodeToolsBusy = node === activeStage && field(nodesById.get(node)?.retry_control)?.dataset.busy === 'true';
+    if (stored === 'processing' || local?.pending || nodeToolsBusy || requestLogWatchers.get(node)?.submitting) {
+      return 'processing';
     }
-    if (item?.status === 'skipped' || skippedByDownstream(node)) return '已跳过';
-    if (live || readySnapshot(node)) return '进行中';
-    return '未完成';
-  }
-
-  function skippedByDownstream(node) {
-    const edges = outgoing(node);
-    // Skip only when every direct successor is complete, current, and bypassed this node.
-    return edges.length > 0 && edges.every(({target}) => {
-      const downstream = head(target);
-      return downstream?.status === 'released' && !inputVersionsChanged(target, downstream)
-        && !Object.hasOwn(downstream.inputs || {}, node);
-    });
+    if (state?.statuses?.[node]?.missing.length) return stored;
+    const version = head(node);
+    const resource = node === activeStage && pickedResource();
+    const selectedDraft = node === activeStage && (
+      (resource && !version?.references.some((ref) => resourceKey(ref) === resourceKey(resource)))
+      || (draft().content.trim() && draft().content.trim() !== (version?.content || ''))
+      || (node === 'prompt' && field('image-prompt').value.trim() && version?.status !== 'released'));
+    if (local?.reference || local?.captureProject || local?.output || selectedDraft
+        || (!head(node) && readySnapshot(node))) return 'waiting_review';
+    if (stored === 'released' && inputChoices.has(`${openProject?.id}/${node}`) && inputVersionsChanged(node)) {
+      return 'waiting_processing';
+    }
+    return stored;
   }
 
   function element(tag, text, className) {
@@ -204,7 +221,7 @@
         if (project !== openProject?.id || !confirm(`将「${entry.title}」退回修改？当前结果会停止向下游传递。`)) return;
         retry.disabled = true;
         try {
-          await request('/api/pipeline/action', {project_id: project, node: entry.node, decision: 'retry', base: entry.id});
+          await request('/api/pipeline/action', {project_id: project, node: entry.node, decision: 'withdraw', base: entry.id});
           if (project === openProject?.id) {
             await refreshApproved();
             refresh();
@@ -309,6 +326,7 @@
     const signature = JSON.stringify(state.roadmap);
     if (signature === mountedRoadmap) return;
     const {nodes, edges} = state.roadmap;
+    syncNodeNavigation(nodes);
     const layout = layoutRoadmap(state.roadmap);
     nodesById = new Map(nodes.map((node) => [node.id, node]));
     const start = nodes.find(({id}) => !edges.some((edge) => edge.target === id && !edge.feedback));
@@ -390,14 +408,17 @@
   }
 
   function renderNodeStatus(badge, node) {
-    const value = nodeStatus(node);
-    const state = {未完成: 'unfinished', 已完成: 'completed', 进行中: 'working', 已跳过: 'skipped'}[value];
+    const status = nodeStatus(node);
+    const value = nodeStateLabels[status];
     badge.textContent = value;
-    badge.dataset.status = state;
+    badge.dataset.status = status;
     const button = badge.closest('.flow-node');
     if (button) {
-      button.dataset.flowStatus = state;
+      button.dataset.flowStatus = status;
       button.title = `${nodesById.get(node).title} · ${value}`;
+      if (button.classList.contains('stage-mini-node')) {
+        button.setAttribute('aria-label', button.title + (button.dataset.neighbor === 'focus' ? ' · 当前节点' : ''));
+      }
     }
   }
 
@@ -466,15 +487,27 @@
     const node = nodesById.get(selected());
     if (!node || !state || !activeStage) return;
     const summary = pipelineSummaries[node.activity || node.snapshot] || kinds[node.kind || 'live'];
-    field('flow-detail-state').textContent = `工作区 · ${summary}`;
     const snapshot = {source: '原文', scenario: '剧本', assets: '项目素材', cues: '演出绑定'}[node.snapshot];
     const live = currentOutput(node.id);
-    field('stage-next-step').textContent = pickedResource()
+    const status = nodeStatus(node.id);
+    const missing = selectedInputs(node.id).missing.map((port) => port.title);
+    field('flow-detail-state').textContent = status === 'waiting_upstream'
+      ? `缺少上游输入：${missing.join('、')}` : `工作区 · ${summary}`;
+    const guidance = {
+      unfinished: '导入数据，或等待上游放行。',
+      waiting_upstream: `缺少上游输入：${missing.join('、')}。`,
+      waiting_processing: '所需输入已到齐，可以运行工具或选用已有产物。',
+      processing: '工具正在处理。完成后可审核产物。',
+      waiting_review: '检查当前产物，再选择「重试」或「通过」。',
+      released: '当前版本已通过，直接下游可使用。',
+      skipped: '直接下游已使用其他输入完成，本节点暂无需提供产物。',
+    };
+    field('stage-next-step').textContent = status === 'processing' || status === 'waiting_upstream' ? guidance[status]
+      : pickedResource()
       ? '通过时使用所选的已有产物。'
-      : readySnapshot(node.id) ? `当前项目已有${snapshot}。通过时使用当前版本。`
-      : live?.pending ? '正在运行。本次任务完成后可通过。'
-      : live?.label ? `当前成果 · ${live.label}`
-      : '在本页制作、修改或选用产物，然后在底部通过。';
+      : status === 'waiting_review' && readySnapshot(node.id) ? `当前项目已有${snapshot}，请审核后通过。`
+      : status === 'waiting_review' && live?.label ? `当前成果 · ${live.label}。请审核后通过。`
+      : guidance[status];
   }
 
   function svgElement(tag, attrs = {}, content = '') {
@@ -518,7 +551,6 @@
         width: `${boxWidth}px`, height: `${boxHeight}px`});
       button.dataset.neighbor = relation;
       button.setAttribute('aria-pressed', String(relation === 'focus'));
-      button.setAttribute('aria-label', `${stageTitle(id)} · ${nodeStatus(id)}${relation === 'focus' ? ' · 当前节点' : ''}`);
       renderNodeStatus(button.querySelector('.stage-status'), id);
       container.append(button);
     };
@@ -541,10 +573,50 @@
   }
 
   function renderInputs(node) {
-    nodeInputs = incoming(node).map(release).filter(Boolean).flatMap((entry) => entry.references);
+    const inputs = selectedInputs(node);
+    nodeInputs = Object.keys(inputs.received).flatMap((source) => head(source)?.references || []);
+    const list = field('stage-input-ports');
+    list.hidden = !inputs.ports.length;
+    const focused = document.activeElement?.dataset.inputPort;
+    list.replaceChildren(...inputs.ports.map((port) => {
+      const row = element('li');
+      const label = element('strong', port.title);
+      row.append(label);
+      const ready = Object.keys(port.available);
+      if (ready.length > 1) {
+        const select = element('select');
+        select.dataset.inputPort = port.id;
+        select.setAttribute('aria-label', `${port.title}来源`);
+        select.append(...ready.map((source) => new Option(stageTitle(source), source)));
+        select.value = port.selected;
+        select.addEventListener('change', () => {
+          inputChoices.set(draftKey(), {...inputChoices.get(draftKey()), [port.id]: select.value});
+          renderInputs(node);
+          updateNodeStatuses();
+        });
+        row.append(select);
+      } else {
+        const source = ready[0];
+        const note = source ? `已收到 · ${stageTitle(source)}`
+          : port.required ? `等待 ${port.sources.map(stageTitle).join(' 或 ') || '可用来源'}` : '可选';
+        row.append(element('span', note, 'stage-version-id'));
+      }
+      return row;
+    }));
+    if (focused) list.querySelector(`[data-input-port="${CSS.escape(focused)}"]`)?.focus();
+    document.dispatchEvent(new CustomEvent('prisma-node-inputs', {detail: {node, ports: inputs.ports}}));
     if (node === 'export') updateWorkspaceStatus();
     renderNeighborhood(node);
   }
+
+  document.addEventListener('prisma-select-input', ({detail}) => {
+    const key = `${openProject?.id}/${detail.node}`;
+    inputChoices.set(key, {...inputChoices.get(key), [detail.port]: detail.source});
+    if (activeStage === detail.node) {
+      renderInputs(detail.node);
+      updateNodeStatuses();
+    }
+  });
 
   function draft() {
     const key = draftKey();
@@ -586,9 +658,12 @@
   function updateButtons() {
     if (!state || !activeStage || !nodesById.has(selected())) return;
     const resource = pickedResource();
-    const running = currentOutput(selected())?.pending || tools.querySelector('[data-busy=true]');
-    field('stage-retry').disabled = busy || Boolean(running);
-    field('stage-pass').disabled = busy || Boolean(running) || !Object.keys(passPayload()).length;
+    const running = nodeStatus(selected()) === 'processing' || tools.querySelector('[data-busy=true]');
+    const blocked = selectedInputs(selected()).missing.length > 0;
+    tools.inert = blocked;
+    for (const choice of field('stage-input-ports').querySelectorAll('select')) choice.disabled = busy || Boolean(running);
+    field('stage-retry').disabled = busy || Boolean(running) || blocked;
+    field('stage-pass').disabled = busy || Boolean(running) || blocked || !Object.keys(passPayload()).length;
     field('stage-view-resource').disabled = !resource;
     field('stage-use-lora').hidden = resource?.kind !== 'lora';
     field('stage-use-lora').disabled = busy;
@@ -628,7 +703,7 @@
           resourceKey(item))));
       if (catalog.some((item) => resourceKey(item) === old)) select.value = old;
       updateButtons();
-      updateActivity();
+      updateNodeStatuses();
     } catch (error) {
       if (sequence !== catalogRequest) return;
       select.replaceChildren(new Option('资源列表读取失败', ''));
@@ -741,6 +816,9 @@
       catalogKey = '';
       loading.hidden = true;
       render();
+      if (showingRoadmap && Object.values(state.statuses).some(({state}) => state === 'processing')) {
+        queueStatusRefresh(2500);
+      }
     } catch (error) {
       if (sequence !== requestNumber) return;
       loading.hidden = false;
@@ -753,9 +831,11 @@
     const project = openProject.id;
     const node = selected();
     const payload = {project_id: project, node, base: head(node)?.id || '', decision};
+    const chosen = selectedInputs(node);
+    payload.input_sources = Object.fromEntries(chosen.ports.filter((port) => port.selected)
+      .map((port) => [port.id, port.selected]));
     if (decision === 'pass') {
-      Object.assign(payload, passPayload(), {
-        inputs: Object.fromEntries(incoming(node).map(release).filter(Boolean).map((entry) => [entry.node, entry.id]))});
+      Object.assign(payload, passPayload(), {inputs: chosen.received});
     }
     busy = true;
     updateButtons();
@@ -768,6 +848,12 @@
       if (project !== openProject?.id || !state) return;
       ++requestNumber;
       Object.assign(state.nodes, result.changed);
+      if (decision === 'pass') {
+        outputs.delete(node);
+        drafts.delete(`${project}/${node}`);
+      }
+      await refresh();
+      if (project !== openProject?.id) return;
       if (activeStage !== node) return updateMap();
       render();
       if (decision === 'pass') {
@@ -800,8 +886,9 @@
   field('stage-content').addEventListener('input', (event) => {
     draft().content = event.target.value;
     updateButtons();
+    updateNodeStatuses();
   });
-  field('stage-resource').addEventListener('change', () => { updateButtons(); updateActivity(); });
+  field('stage-resource').addEventListener('change', () => { updateButtons(); updateNodeStatuses(); });
   field('stage-resource-query').addEventListener('input', () => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(loadResources, 250);
@@ -831,20 +918,29 @@
       goWorkspace(target.id);
     }
   });
-  tools.addEventListener('input', () => { updateButtons(); updateActivity(); renderOutputs(); });
+  tools.addEventListener('input', () => { updateButtons(); updateNodeStatuses(); renderOutputs(); });
   tools.addEventListener('change', updateButtons);
   document.addEventListener('prisma-provider-catalog', updateButtons);
-  new MutationObserver(updateButtons).observe(tools, {attributes: true, attributeFilter: ['data-busy'], subtree: true});
+  new MutationObserver(() => { updateButtons(); updateNodeStatuses(); })
+    .observe(tools, {attributes: true, attributeFilter: ['data-busy'], subtree: true});
+  let statusRefreshTimer;
+  function queueStatusRefresh(delay = 250) {
+    clearTimeout(statusRefreshTimer);
+    statusRefreshTimer = setTimeout(refresh, delay);
+  }
   document.addEventListener('prisma-node-output', ({detail}) => {
     const old = outputs.get(detail.node);
     if (detail.result) outputs.set(detail.node, detail.result);
     else outputs.delete(detail.node);
+    updateNodeStatuses();
+    if (old?.pending !== detail.result?.pending || old?.reference?.id !== detail.result?.reference?.id) {
+      queueStatusRefresh();
+    }
     if (detail.node === activeStage) {
       if (old?.pending && detail.result && !detail.result.pending) {
         catalogKey = '';
         loadResources();
       }
-      updateActivity();
       renderOutputs();
       updateButtons();
     }
@@ -875,16 +971,21 @@
     }
     render();
   });
-  document.addEventListener('prisma-pipeline-activity', () => {
+  function updateNodeStatuses() {
     if (!state) return;
     updateMap();
     if (!activeStage) return;
     renderNodeStatus(field('stage-node-state'), selected());
+    for (const button of field('stage-neighborhood').querySelectorAll('.stage-mini-node')) {
+      renderNodeStatus(button.querySelector('.stage-status'), button.dataset.node);
+    }
     updateActivity();
     updateButtons();
-  });
-  document.addEventListener('prisma-pipeline-refresh', refresh);
+  }
+  document.addEventListener('prisma-pipeline-activity', updateNodeStatuses);
+  document.addEventListener('prisma-pipeline-refresh', () => queueStatusRefresh());
   document.addEventListener('prisma-project-change', () => {
+    clearTimeout(statusRefreshTimer);
     ++approvedRequest;
     approvedItems = [];
     approvedQuery.value = '';
@@ -912,6 +1013,9 @@
     const onRoadmap = ['projects', 'pipeline-stage'].includes(event.detail);
     if (onRoadmap && !showingRoadmap && openProject && state) refresh();
     showingRoadmap = onRoadmap;
+  });
+  window.addEventListener('focus', () => {
+    if (showingRoadmap && openProject) queueStatusRefresh();
   });
 })();
 

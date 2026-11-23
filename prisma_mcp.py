@@ -11,7 +11,9 @@ from urllib.parse import quote
 from image_toolkit import IMAGE_TYPES, ONLINE_SIZES, SAMPLERS
 from image_library import KINDS
 from lora_export import save_export
-from pipeline_workflow import NODES, REFERENCE_KINDS, PipelineWorkflow
+from pipeline_nodes import LOCAL_NODE_IDS, REFERENCE_KINDS
+from pipeline_plugins import PluginManager
+from pipeline_workflow import PipelineWorkflow
 from prisma_workflow import StudioWorkflow, inspect, make_archive
 from scenario_production import ScenarioProduction
 from provider_model_info import TEST_OPERATIONS
@@ -59,11 +61,23 @@ def rpc_error(ident, code, message):
     return {'jsonrpc': '2.0', 'id': ident, 'error': {'code': code, 'message': message}}
 
 
+NODE_TOOLS = {
+    'scenario_draft': 'scenario', 'scenario_production_generate': 'scenario',
+    'scenario_production_publish': 'scenario',
+    'scenario_asset_prompt': 'prompt', 'scenario_background_prompt': 'background-generation',
+    'script_preview': 'cues', 'script_bind': 'cues', 'speech_generate': 'voice-assets',
+    'renpy_export': 'export', 'image_install': 'models', 'lora_import': 'models',
+    'lora_prepare': 'models', 'lora_export': 'models', 'dataset_save': 'dataset',
+    'dataset_restore': 'dataset', 'lora_train': 'train',
+}
+
+
 class PrismaMCP:
-    def __init__(self, images, base_url):
+    def __init__(self, images, base_url, *, node_manifests=()):
         self.images = images
         self.workflow = StudioWorkflow(images.resources)
-        self.pipeline = PipelineWorkflow(images.resources)
+        self.plugins = PluginManager(images.resources, node_manifests)
+        self.pipeline = PipelineWorkflow(images.resources, images.jobs, plugins=self.plugins)
         self.script_editor = ScriptEditor(images.resources, self.pipeline)
         self.production = ScenarioProduction(self.workflow, self.script_editor, images.resources)
         self.renpy_sdk = RenpySDK(self.script_editor, self.pipeline, images.jobs)
@@ -132,9 +146,10 @@ class PrismaMCP:
              self.workflow.speech, {'project_id': JOB, 'text': TEXT, 'voice': TEXT, 'speed': schema('number'),
                                   'line_id': TEXT, 'run_id': TEXT, 'model_override': row({'provider_id': TEXT, 'model': TEXT}, ('provider_id', 'model'))},
              ('project_id', 'text', 'voice'), open_world=True)
-        tool('generation_log', 'Read the latest Scenario or speech generation log, or find a specific run.',
+        tool('generation_log', 'Read Scenario or speech run history, request phases, token usage and optional failure evidence.',
              self.workflow.generation_log, {'project_id': JOB, 'node': enum('scenario', 'voice-assets'),
-                                            'run_id': TEXT, 'include_response': BOOL}, ('node',), read_only=True)
+                                            'run_id': TEXT, 'request_id': TEXT, 'include_response': BOOL,
+                                            'include_history': BOOL}, ('node',), read_only=True)
         tool('scenario_inspect', 'Return normalized Scenario JSON and list scenes, speakers, and stable text item IDs.', inspect,
              {'scenario': SCENARIO}, ('scenario',), read_only=True)
         tool('scenario_save', 'Register edited source, Scenario and cues without changing their content.',
@@ -238,25 +253,32 @@ class PrismaMCP:
              lambda data: images.resources.set_project_trash(data, trash=True), {'id': JOB}, ('id',), destructive=True)
         tool('project_restore_deleted', 'Restore a project from the trash with its revisions and files.',
              lambda data: images.resources.set_project_trash(data, trash=False), {'id': JOB}, ('id',))
-        stage = {'project_id': JOB, 'node': enum(*NODES)}
-        tool('pipeline_state', 'Read the project graph and the current result version of each node.',
+        stage = {'project_id': JOB, 'node': TEXT}
+        tool('plugin_list', 'List workspace node plugins, their enabled state, and active nodes.',
+             self.plugins.list, {}, read_only=True)
+        tool('plugin_set_enabled', 'Enable or disable a registered workspace node plugin and refresh the active graph.',
+             self.plugins.set_enabled, {'id': TEXT, 'enabled': BOOL}, ('id', 'enabled'))
+        tool('pipeline_state', 'Read the project graph, current result versions, and node lifecycle states with received input versions and missing inputs.',
              self.pipeline.state, {'project_id': JOB}, ('project_id',), read_only=True)
         tool('pipeline_inputs', 'Read passed upstream versions and available scene background drafts separately.',
-             self.pipeline.inputs, stage, ('project_id', 'node'), read_only=True)
+             self.pipeline.inputs, {**stage, 'input_sources': OBJECT}, ('project_id', 'node'), read_only=True)
+        tool('pipeline_check', 'Check all required node input ports before executing a node. Optionally select an approved source per port.',
+             self.pipeline.require_ready, {**stage, 'input_sources': OBJECT}, ('project_id', 'node'), read_only=True)
         tool('pipeline_approved', 'List current approved project outputs and their resource IDs. Specify a node to read its full output notes. needs_review indicates changed upstream versions.',
              self.pipeline.approved, stage, ('project_id',), read_only=True)
         tool('pipeline_reusable', 'Find available project and shared artifacts that the node can reuse.',
              self.pipeline.reusable, {**stage, 'query': TEXT}, ('project_id', 'node'), read_only=True)
         tool('pipeline_action', 'Record a node result version, retry a node, or pass its current output to every direct downstream node. Node versions belong to a single project.',
-             self.pipeline.decide, {**stage, 'decision': enum('retry', 'pass'), 'base': TEXT,
+             self.pipeline.decide, {**stage, 'decision': enum('retry', 'pass', 'withdraw'), 'base': TEXT,
                  'content': TEXT,
                  'references': schema('array', items=OBJECT), 'capture_project': BOOL,
-                 'output': OBJECT, 'inputs': OBJECT}, ('project_id', 'node', 'decision', 'base'))
+                 'output': OBJECT, 'inputs': OBJECT, 'input_sources': OBJECT}, ('project_id', 'node', 'decision', 'base'))
         tool('asset_import', 'Register media from base64, reuse an existing asset by library ID, or reuse a generated image.',
              images.import_workspace_asset, {'name': TEXT, 'data': TEXT, 'artifact': IMAGE_ASSET, 'library_id': TEXT,
                                               'project_id': JOB})
         tool('image_install', 'Download and validate missing local components. Inference installs the Windows Vulkan engine and SD 1.x base; training installs the CUDA or Apple MPS environment and selected SD 1.x or Animagine XL 4.0 anime SDXL base. On Apple Silicon, iris3b or anima installs MFlux and Apple MLX with the selected model snapshot for local LoRA training. Anima Base is anime-specific; its model and derivatives are limited to non-commercial use.',
-             images.provision, {'target': enum('inference', 'training'), 'base_model': enum('sd1', 'sdxl', 'iris3b', 'anima')},
+             images.provision, {'target': enum('inference', 'training'), 'base_model': enum('sd1', 'sdxl', 'iris3b', 'anima'),
+                                'project_id': JOB},
              ('target',), open_world=True)
         tool('dataset_source', 'List reference images and existing captions. Use source reference for the directory configured at startup.',
              self.dataset_source, {'source': TEXT}, ('source',), read_only=True)
@@ -290,7 +312,8 @@ class PrismaMCP:
                                'base_model': enum('sd1', 'sdxl', 'anima'), 'width': INT,
                                'height': INT, 'steps': INT, 'cfg': schema('number'), 'sampler': enum(*SAMPLERS),
                                'weight': schema('number'), 'seed': INT, 'prompt_id': TEXT,
-                               'project_id': JOB}, ('mode', 'prompt'), open_world=True)
+                               'project_id': JOB, 'pipeline_node': enum('generation', 'background-generation')},
+             ('prompt',), open_world=True)
         tool('image_job', 'Read a job state, parameters, input hashes, log tail, and artifact links by job ID.',
              self.job, {'id': JOB}, ('id',), read_only=True)
         tool('image_recover_training', 'Recover artifacts from a completed Iris-3B training run when MFlux wrote them to its timestamped output folder. The task is marked complete only after the final LoRA archive is found and registered.',
@@ -333,6 +356,53 @@ class PrismaMCP:
         self.tools[name] = (handler, dict(name=name, description=description, inputSchema=row(fields, required),
                                          annotations=dict(readOnlyHint=read_only, destructiveHint=destructive,
                                                           openWorldHint=open_world)))
+
+    def run_operation(self, name, args, handler):
+        node = NODE_TOOLS.get(name)
+        project = args.get('project_id')
+        if name == 'image_replay':
+            original = self.images.jobs.get(args['id'])
+            operation = {'generate': 'image_generate', 'train': 'lora_train', 'install': 'image_install'}.get(original['kind'])
+            if operation:
+                return self.run_operation(operation, original['options'], lambda _: handler(args))
+        if name == 'image_generate':
+            mode = args.get('mode')
+            if mode not in (None, 'local', 'online'):
+                raise ValueError('图像生成方式无效。')
+            if mode == 'local' and 'models' not in self.pipeline.registry.nodes:
+                raise ValueError('请先在插件管理中启用「本地图像与 LoRA」。')
+            args = dict(args)
+            if project:
+                context = {}
+                if args.get('prompt_id'):
+                    prompt = self.images.library.get('prompt', args['prompt_id'])
+                    if prompt['project_id'] == project:
+                        context = prompt['metadata'].get('context', {})
+                scene = context.get('scene_design_id') or args.get('scene_design_id')
+                node = args.get('pipeline_node') or ('background-generation' if scene else 'generation')
+                if node not in ('generation', 'background-generation'):
+                    raise ValueError('图像生成节点无效。')
+                sources = {'model': 'models' if mode == 'local' else 'online'} if mode else None
+                resolution = self.pipeline.require_ready({'project_id': project, 'node': node, 'input_sources': sources})
+                if node == 'background-generation':
+                    background_version = resolution['received']['background-assets']
+                    background = self.pipeline.inputs({'project_id': project, 'node': node})['inputs']
+                    if not any(entry['id'] == background_version and any(
+                            ref['kind'] == 'scene-design' and ref['id'] == scene for ref in entry['references'])
+                               for entry in background):
+                        raise ValueError('请选用上游已放行的场景背景，再载入提示词。')
+                model = next(port for port in resolution['ports'] if port['id'] == 'model')
+                args['mode'] = 'local' if model['selected'] == 'models' else 'online'
+                args['pipeline_inputs'] = resolution['received']
+                args['pipeline_node'] = node
+            else:
+                args['mode'] = mode or 'online'
+            return handler(args)
+        if node in LOCAL_NODE_IDS and node not in self.pipeline.registry.nodes:
+            raise ValueError('请先在插件管理中启用「本地图像与 LoRA」。')
+        if node and project:
+            self.pipeline.require_ready({'project_id': project, 'node': node})
+        return handler(args)
 
     def save_dataset(self, args):
         saved = self.images.save_dataset(args)
@@ -460,7 +530,7 @@ class PrismaMCP:
         try:
             if args.get('project_id'):
                 self.images.resources.project_record(args['project_id'])
-            output = handler(args)
+            output = self.run_operation(name, args, handler)
         except (OSError, ValueError) as error:
             return {'isError': True, 'content': [{'type': 'text', 'text': str(error)}]}
         data, blocks = output if isinstance(output, tuple) else (output, [])

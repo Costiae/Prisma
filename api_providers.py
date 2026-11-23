@@ -4,12 +4,14 @@ import ipaddress
 import json
 import re
 from datetime import datetime, timezone
+from http.client import HTTPException
 from time import perf_counter
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
 
+from generation_transport import buffered_chat, streamed_chat
 from provider_model_info import (
     CAPABILITIES, TEST_OPERATIONS, model_capabilities, model_probe, probe_packet, probe_summary, probe_usage,
 )
@@ -24,9 +26,10 @@ class NoApiRedirect(HTTPRedirectHandler):
 
 
 class ProviderRequestError(ValueError):
-    def __init__(self, message, status):
+    def __init__(self, message, status, detail=''):
         super().__init__(message)
         self.status = status
+        self.detail = detail
 
 
 def validate_url(value):
@@ -65,8 +68,11 @@ def endpoint(base_url, operation):
 
 
 def api_request(provider, operation, payload=None, *, limit=2_000_000, timeout=20, binary=False,
-                query=None, content_type='application/json', response_meta=False, include_error_detail=False):
+                query=None, content_type='application/json', response_meta=False, include_error_detail=False,
+                progress=None):
     headers = {'Accept': 'audio/mpeg' if binary else 'application/json'}
+    if isinstance(payload, dict) and payload.get('stream') is True:
+        headers['Accept'] = 'text/event-stream, application/json'
     key = provider['api_key']
     if provider['protocol'] == 'anthropic':
         headers['anthropic-version'] = '2023-06-01'
@@ -83,11 +89,22 @@ def api_request(provider, operation, payload=None, *, limit=2_000_000, timeout=2
         url += '?' + urlencode(query)
     try:
         with build_opener(NoApiRedirect()).open(Request(url, data=body, headers=headers), timeout=timeout) as response:
-            raw = response.read(limit + 1)
             status = response.status
-        if len(raw) > limit:
-            raise ValueError('API 响应超过大小限制。')
-        value = raw if binary else json.loads(raw)
+            is_chat = operation in ('chat/completions', 'messages')
+            streaming = is_chat and response.headers.get_content_type() == 'text/event-stream'
+            if progress:
+                progress('waiting', status=status, transport='stream' if streaming else 'buffered')
+            if streaming:
+                value = streamed_chat(response, provider['protocol'], limit, progress or (lambda *_args, **_fields: None))
+            else:
+                raw = response.read(limit + 1)
+                if len(raw) > limit:
+                    raise ValueError('API 响应超过大小限制。')
+                value = raw if binary else json.loads(raw)
+                if progress and is_chat:
+                    value = buffered_chat(value, provider['protocol'], progress)
+                elif progress:
+                    progress('received', response_bytes=len(raw), usage=probe_usage(value))
         return (status, value) if response_meta else value
     except HTTPError as error:
         hints = {401: '请检查 API Key', 403: '请检查账号权限', 404: '请检查 API 地址或接口是否受支持',
@@ -95,16 +112,20 @@ def api_request(provider, operation, payload=None, *, limit=2_000_000, timeout=2
         detail = ''
         if include_error_detail and error.code != 401:
             try:
-                body = json.loads(error.read(8192))
-                api_error = body.get('error') if isinstance(body, dict) else None
-                message = api_error.get('message') if isinstance(api_error, dict) else None
+                raw = error.read(8192)
+                try:
+                    body = json.loads(raw)
+                except (UnicodeError, ValueError):
+                    body = raw.decode('utf-8', errors='replace') if error.headers.get_content_type() == 'text/plain' else ''
+                api_error = body.get('error') or body.get('message') if isinstance(body, dict) else body
+                message = api_error.get('message') if isinstance(api_error, dict) else api_error
                 if isinstance(message, str):
                     detail = ' ' + scrub(message, key)
             except (OSError, ValueError):
                 pass
         raise ProviderRequestError(
-            f"API /{operation} 返回 HTTP {error.code}。{hints.get(error.code, '')}{detail}", error.code) from None
-    except (OSError, URLError, TimeoutError) as error:
+            f"API /{operation} 返回 HTTP {error.code}。{hints.get(error.code, '')}{detail}", error.code, detail) from None
+    except (OSError, URLError, HTTPException) as error:
         raise ValueError(f'无法连接 API /{operation}：{error}') from None
     except (UnicodeError, json.JSONDecodeError):
         raise ValueError(f'API /{operation} 未返回有效 JSON。') from None

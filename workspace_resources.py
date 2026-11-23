@@ -37,7 +37,7 @@ DEFAULT_PROJECT_CONFIG = {
                              'and null for narration. Keep valid sequential chapter IDs and scene IDs such as 1 and 1:1. '
                              'Optional line fields are viewpoint and direction. Do not output Markdown fences.')},
     'llm_overrides': {'scenario': {'enabled': False, 'settings': {}}},
-    'generation': {'mode': 'local', 'base_model': '', 'lora': '', 'compare': 'none', 'weight': 0.35,
+    'generation': {'mode': 'online', 'base_model': '', 'lora': '', 'compare': 'none', 'weight': 0.35,
                    'size': '512x896', 'seed': None, 'sampler': 'euler_a', 'steps': 20, 'cfg': 6.5,
                    'count': 1, 'negative': 'worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, chromatic aberration, bad anatomy, extra limbs, text, watermark',
                    'online_model': '', 'online_size': '1024x1536', 'quality': 'medium'},

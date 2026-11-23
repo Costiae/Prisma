@@ -76,7 +76,7 @@ class ImageLibrary:
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version == 0:
                 db.execute('PRAGMA journal_mode=WAL')
-            if version < 9:
+            if version < 10:
                 db.execute('BEGIN IMMEDIATE')
                 version = db.execute('PRAGMA user_version').fetchone()[0]
                 if version == 0:
@@ -142,9 +142,16 @@ class ImageLibrary:
                     version = 8
                 if version < 9:
                     db.execute('ALTER TABLE generation_runs ADD COLUMN response_text TEXT')
-                    db.execute('PRAGMA user_version=9')
+                    version = 9
+                if version < 10:
+                    db.execute("""CREATE TABLE generation_requests (
+                        id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES generation_runs(id) ON DELETE CASCADE,
+                        snapshot TEXT NOT NULL, evidence TEXT
+                    )""")
+                    db.execute('CREATE INDEX generation_requests_run ON generation_requests(run_id)')
+                    db.execute('PRAGMA user_version=10')
                 db.commit()
-            elif version != 9:
+            elif version != 10:
                 raise ValueError(f'此 Prisma 版本无法读取目录数据库版本 {version}。')
             yield db
 

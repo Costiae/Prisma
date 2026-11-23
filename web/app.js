@@ -475,6 +475,19 @@ function setRouteNavOpen(open) {
   toggle.setAttribute('aria-label', open ? '折叠路线图节点' : '展开路线图节点');
 }
 
+function syncNodeNavigation(nodes) {
+  const menu = field('route-nav-children');
+  const routes = nodes.map((node) => `#stage-${node.id}`);
+  if (Array.from(menu.querySelectorAll('a'), (link) => link.hash).join() === routes.join()) return;
+  menu.replaceChildren(...nodes.map((node, index) => {
+    const link = document.createElement('a');
+    link.href = routes[index];
+    link.textContent = node.title;
+    if (link.hash === location.hash) link.setAttribute('aria-current', 'page');
+    return link;
+  }));
+}
+
 function workspaceView() {
   const hash = location.hash.slice(1);
   let id;
@@ -490,7 +503,7 @@ function workspaceView() {
   let view = target?.closest('[data-workspace-view]') || field('projects');
   // Production surfaces need an opened project; the project library and
   // workspace-level API provider manager are global.
-  if (!['project-manager', 'api-providers'].includes(view.id) && !openProject) {
+  if (!['project-manager', 'api-providers', 'plugin-manager'].includes(view.id) && !openProject) {
     if (stage || ['projects', 'script-ide-workspace', 'approved-assets', 'project-config'].includes(id)) pendingProjectView = id;
     view = field('project-manager');
     target = view;
@@ -520,7 +533,7 @@ function workspaceView() {
     else link.removeAttribute('aria-current');
   });
   updateWorkspaceTitle(view);
-  field('workspace-map-link').hidden = ['projects', 'project-manager', 'pipeline-stage', 'api-providers'].includes(view.id);
+  field('workspace-map-link').hidden = ['projects', 'project-manager', 'pipeline-stage', 'api-providers', 'plugin-manager'].includes(view.id);
   if (stage && openProject) document.dispatchEvent(new CustomEvent('prisma-stage-change', {detail: stage[1]}));
   if (target && target !== view && target.id !== 'pipeline') {
     const disclosure = target.closest('details');
@@ -621,17 +634,121 @@ async function run(button, pending, task) {
 
 const requestLogNodes = {'scenario': 'scenario-request-log', 'voice-assets': 'voice-request-log'};
 const requestLogWatchers = new Map();
+const runStates = {running: '运行中', done: '已完成', failed: '失败', interrupted: '服务重启，运行已中断'};
+const requestPhases = {connecting: '连接中', waiting: '等待响应正文', stream: '正在接收输出',
+  received: '已收到响应', validating: '正在校验', completed: '请求完成', failed: '请求失败',
+  retrying: '切换为普通响应', interrupted: '已中断', cached: '命中缓存'};
 
-function showRequestLog(node, run, fallback = '') {
+function tokenSummary(usage = {}) {
+  return Object.entries({input_tokens: '输入', output_tokens: '输出', reasoning_tokens: '思考',
+    cache_read_input_tokens: '读取缓存', cache_creation_input_tokens: '写入缓存', total_tokens: '合计'})
+    .filter(([key]) => usage[key] != null)
+    .map(([key, label]) => `${label} ${usage[key].toLocaleString()} tokens`);
+}
+
+async function readRequestEvidence(node, runId, requestId, output) {
+  const project = openProject?.id;
+  output.hidden = false;
+  output.textContent = '正在读取…';
+  try {
+    const {run} = await (await request('/api/generation/log', {
+      project_id: project, node, run_id: runId, request_id: requestId, include_response: true,
+    })).json();
+    if (openProject?.id === project && output.dataset.run === runId) {
+      output.textContent = run?.response_text || '没有可显示的响应正文。';
+    }
+  } catch (error) {
+    if (openProject?.id === project && output.dataset.run === runId) output.textContent = error.message;
+  }
+}
+
+function renderGenerationRequests(node, panel, run) {
+  const list = panel.querySelector('.request-log-requests');
+  const usage = panel.querySelector('.request-log-summary');
+  const requests = run?.requests || [];
+  const tokens = tokenSummary(run?.usage);
+  const requested = requests.filter((item) => item.phase !== 'cached');
+  const cacheHits = requests.length - requested.length;
+  usage.hidden = !requests.length;
+  usage.textContent = [requested.length + ' 次模型调用', cacheHits ? cacheHits + ' 批命中缓存' : '',
+    ...tokens].filter(Boolean).join(' · ');
+  const previous = new Map([...list.children].map((item) => [item.dataset.request, item]));
+  const active = requested.find((item) => ['connecting', 'waiting', 'stream', 'retrying', 'validating'].includes(item.phase));
+  for (const detail of requests) {
+    const {context, usage: measured, provider, model, phase} = detail;
+    const existing = previous.get(detail.id);
+    if (existing) previous.delete(detail.id);
+    const row = existing || document.createElement('details');
+    if (!existing) {
+      row.dataset.request = detail.id;
+      const heading = document.createElement('summary');
+      const numbers = document.createElement('p');
+      numbers.className = 'hint';
+      const message = document.createElement('p');
+      const preview = document.createElement('pre');
+      preview.setAttribute('aria-label', '模型正文末尾预览');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = '查看失败响应';
+      const evidence = document.createElement('pre');
+      evidence.hidden = true;
+      evidence.dataset.run = run.id;
+      button.onclick = () => readRequestEvidence(node, run.id, detail.id, evidence);
+      row.append(heading, numbers, message, preview, button, evidence);
+      row.open = detail.id === active?.id || (phase === 'failed' && requested.length === 1);
+      list.append(row);
+    }
+    const [heading, numbers, message, preview, evidenceButton] = row.children;
+    const label = context.chapter
+      ? `第 ${context.number} 章 · 第 ${context.batch} 批 · 原文 ${context.first_line}–${context.last_line} 行`
+      : context.label;
+    const elapsed = ['connecting', 'waiting', 'stream', 'retrying', 'validating'].includes(phase)
+      && run.state === 'running' ? Math.max(detail.elapsed, (Date.now() - Date.parse(detail.at)) / 1000) : detail.elapsed;
+    heading.textContent = [label, provider && `${provider} / ${model}`, requestPhases[phase]].filter(Boolean).join(' · ');
+    numbers.textContent = phase === 'cached' ? '' : [
+      `${elapsed.toFixed(1)} 秒`, detail.first_output != null ? `首段 ${detail.first_output.toFixed(1)} 秒` : '',
+      detail.operation, detail.status ? 'HTTP ' + detail.status : '', '请求 ' + detail.id.slice(0, 8),
+      detail.transport === 'stream' ? '流式' : detail.transport === 'buffered' ? '普通响应' : '',
+      `输入 ${detail.prompt_chars.toLocaleString()} 字符`,
+      detail.content_chars != null ? `正文 ${detail.content_chars.toLocaleString()} 字符` : '',
+      detail.reasoning_chars != null ? `思考 ${detail.reasoning_chars.toLocaleString()} 字符` : '',
+      detail.response_bytes != null ? `响应 ${detail.response_bytes.toLocaleString()} 字节` : '',
+      ...tokenSummary(measured), detail.finish_reason ? '停止原因 ' + detail.finish_reason : '',
+      detail.max_tokens ? '输出上限 ' + detail.max_tokens : '', '请求超时 ' + detail.timeout + ' 秒',
+      detail.attempt > 1 ? '尝试 ' + detail.attempt : '',
+    ].filter(Boolean).join(' · ');
+    numbers.hidden = !numbers.textContent;
+    message.textContent = [detail.error, ...(detail.retries || []).map((retry) => retry.error)].filter(Boolean).join(' · ');
+    message.className = phase === 'failed' ? 'error-text' : 'hint';
+    message.hidden = !message.textContent;
+    preview.hidden = !detail.preview;
+    if (preview.textContent !== (detail.preview || '')) preview.textContent = detail.preview || '';
+    evidenceButton.hidden = !detail.has_evidence;
+  }
+  for (const outdated of previous.values()) outdated.remove();
+}
+
+function showRequestLog(node, run, fallback = '', history = []) {
   const panel = field(requestLogNodes[node]);
-  const status = {running: '运行中', done: '已完成', failed: '失败', interrupted: '服务重启，运行已中断'};
   const summary = panel.querySelector('[role=status]');
-  const title = run ? status[run.state] : fallback || '暂无运行记录';
+  const title = run ? runStates[run.state] : fallback || '暂无运行记录';
   if (summary.textContent !== title) summary.textContent = title;
   summary.classList.toggle('error-text', ['failed', 'interrupted'].includes(run?.state));
+  const runs = panel.querySelector('select');
+  const signature = JSON.stringify(history);
+  if (runs.dataset.signature !== signature) {
+    const selected = runs.value;
+    runs.replaceChildren(new Option('最近一次', ''), ...history.map(({id, at, state}) =>
+      new Option([at && new Date(at).toLocaleString('zh-CN', {hour12: false}), runStates[state], id.slice(0, 8)]
+        .filter(Boolean).join(' · '), id)));
+    if (history.some(({id}) => id === selected)) runs.value = selected;
+    runs.dataset.signature = signature;
+    runs.parentElement.hidden = !history.length;
+  }
+  renderGenerationRequests(node, panel, run);
   if (node === 'scenario') {
     const details = field('scenario-response-preview');
-    const id = run?.has_response ? run.id : '';
+    const id = run?.has_response && !run.requests?.some((item) => item.has_evidence) ? run.id : '';
     if (details.dataset.run !== id) {
       details.dataset.run = id;
       details.open = false;
@@ -641,9 +758,9 @@ function showRequestLog(node, run, fallback = '') {
   }
   const output = panel.querySelector('ol');
   const events = run?.events || [];
-  const signature = JSON.stringify(events);
-  if (output.dataset.signature === signature) return;
-  output.dataset.signature = signature;
+  const timeline = JSON.stringify(events);
+  if (output.dataset.signature === timeline) return;
+  output.dataset.signature = timeline;
   output.replaceChildren(...events.map((event) => {
     const row = document.createElement('li');
     const time = document.createElement('time');
@@ -657,37 +774,32 @@ function showRequestLog(node, run, fallback = '') {
 field('scenario-response-preview').ontoggle = async (event) => {
   const details = event.currentTarget;
   const runId = details.dataset.run;
-  const project = openProject?.id;
   const output = details.querySelector('pre');
   if (!details.open || !runId || output.textContent) return;
-  output.textContent = '正在读取…';
-  try {
-    const {run} = await (await request('/api/generation/log', {
-      project_id: project, node: 'scenario', run_id: runId, include_response: true,
-    })).json();
-    if (details.dataset.run === runId && openProject?.id === project) {
-      output.textContent = run?.response_text || '没有可显示的响应正文。';
-    }
-  } catch (error) {
-    if (details.dataset.run === runId && openProject?.id === project) output.textContent = error.message;
-  }
+  output.dataset.run = runId;
+  await readRequestEvidence('scenario', runId, undefined, output);
 };
 
-function watchRequestLog(node, project, runId) {
-  const watcher = {};
+function watchRequestLog(node, project, runId, {submitting = false} = {}) {
+  const watcher = {submitting};
   requestLogWatchers.set(node, watcher);
+  const panel = field(requestLogNodes[node]);
   const current = () => requestLogWatchers.get(node) === watcher && project === openProject?.id;
-  if (runId) showRequestLog(node, null, '正在提交请求…');
+  const query = {project_id: project, node, run_id: runId || undefined, include_history: true};
+  if (submitting) panel.querySelector('[role=status]').textContent = '正在提交请求…';
   const read = async () => {
     if (!current()) return;
     try {
-      const query = {project_id: project, node, ...(runId ? {run_id: runId} : {})};
-      const {run} = await (await request('/api/generation/log', query)).json();
-      if (!current()) return;
-      if (run || !runId) showRequestLog(node, run);
-      if (run?.state === 'running' || (runId && !run && !watcher.finished)) setTimeout(read, 1100);
+      const {run, history} = await (await request('/api/generation/log', query)).json();
+      if (!current() || watcher.finished) return;
+      if (run || !submitting) showRequestLog(node, run, '', history);
+      if (run?.state === 'running' || (submitting && !run && !watcher.finished)) setTimeout(read, 1100);
+      else if (!runId && !panel.closest('[hidden]')) setTimeout(read, 3500);
     } catch (error) {
-      if (current() && !watcher.finished) setTimeout(read, 2500);
+      if (current() && !watcher.finished) {
+        panel.querySelector('[role=status]').textContent = '日志连接中断，正在重连…';
+        setTimeout(read, 2500);
+      }
     }
   };
   read();
@@ -695,9 +807,14 @@ function watchRequestLog(node, project, runId) {
     watcher.finished = true;
     if (!current()) return;
     try {
-      const {run} = await (await request('/api/generation/log', {project_id: project, node, run_id: runId})).json();
-      if (current()) showRequestLog(node, run, error?.message || '请求已结束。');
+      const {run, history} = await (await request('/api/generation/log', query)).json();
+      if (current()) {
+        showRequestLog(node, run, error?.message || '请求已结束。', history);
+        watcher.submitting = false;
+        if (run) watchRequestLog(node, project);
+      }
     } catch (failure) {
+      watcher.submitting = false;
       if (current()) showRequestLog(node, null, error?.message || failure.message);
     }
   };
@@ -705,7 +822,9 @@ function watchRequestLog(node, project, runId) {
 
 async function generationRequest(node, url, data) {
   const run_id = crypto.randomUUID().replaceAll('-', '');
-  const finish = watchRequestLog(node, data.project_id, run_id);
+  field(requestLogNodes[node]).querySelector('select').value = '';
+  const finish = watchRequestLog(node, data.project_id, run_id, {submitting: true});
+  document.dispatchEvent(new Event('prisma-pipeline-activity'));
   try {
     const result = await (await request(url, {...data, run_id})).json();
     await finish();
@@ -713,6 +832,8 @@ async function generationRequest(node, url, data) {
   } catch (error) {
     await finish(error);
     throw error;
+  } finally {
+    if (data.project_id === openProject?.id) document.dispatchEvent(new Event('prisma-pipeline-refresh'));
   }
 }
 
@@ -721,8 +842,13 @@ document.addEventListener('prisma-project-change', () => {
   for (const node of Object.keys(requestLogNodes)) showRequestLog(node, null);
 });
 document.addEventListener('prisma-node-tools', ({detail}) => {
-  if (requestLogNodes[detail] && openProject && !requestLogWatchers.has(detail)) watchRequestLog(detail, openProject.id);
+  if (requestLogNodes[detail] && openProject && !requestLogWatchers.get(detail)?.submitting) {
+    watchRequestLog(detail, openProject.id, field(requestLogNodes[detail]).querySelector('select').value);
+  }
 });
+for (const [node, id] of Object.entries(requestLogNodes)) {
+  field(id).querySelector('select').onchange = (event) => watchRequestLog(node, openProject?.id, event.currentTarget.value);
+}
 
 function download(blob, filename) {
   const url = URL.createObjectURL(blob);
